@@ -7,3 +7,6 @@
 .idea
 .cache
 tags
+.logs
+.env
+__pycache__

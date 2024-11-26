@@ -8,7 +8,7 @@
 //! For more details look at:
 //! - Paragraph '3. Folding scheme' at [Nova whitepaper](https://eprint.iacr.org/2021/370)
 //! - [nifs module](https://github.com/microsoft/Nova/blob/main/src/nifs.rs) at [Nova codebase](https://github.com/microsoft/Nova)
-use halo2_proofs::{arithmetic::CurveAffine, plonk::Error as Halo2Error};
+use halo2_proofs::plonk::Error as Halo2Error;
 use rayon::prelude::*;
 
 use crate::{
@@ -16,13 +16,14 @@ use crate::{
     plonk::{eval::Error as EvalError, PlonkInstance, PlonkStructure, PlonkTrace},
     poseidon::ROTrait,
     sps::Error as SpsError,
+    traits::BDCurveAffine,
 };
 
 pub mod protogalaxy;
 pub mod vanilla;
 
 /// Trait representing the NIFS folding scheme.
-pub trait FoldingScheme<C: CurveAffine, const L: usize = 1> {
+pub trait FoldingScheme<C: BDCurveAffine, const L: usize = 1> {
     type Error;
 
     /// Metadata for prover including hash of public params

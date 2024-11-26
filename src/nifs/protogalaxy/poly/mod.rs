@@ -421,6 +421,10 @@ mod test {
             12,
             poseidon_circuit::TestPoseidonCircuit::default(),
             vec![],
+            0,
+            0,
+            0,
+            0,
         );
 
         let S = runner.try_collect_plonk_structure().unwrap();

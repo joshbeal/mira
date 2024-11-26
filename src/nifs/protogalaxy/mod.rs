@@ -13,7 +13,9 @@ use crate::{
         RelaxedPlonkWitness,
     },
     polynomial::{lagrange, univariate::UnivariatePoly},
-    sps, util,
+    sps,
+    traits::BDCurveAffine,
+    util,
 };
 
 mod accumulator;
@@ -32,11 +34,11 @@ pub use accumulator::{Accumulator, AccumulatorArgs};
 /// - `L`: 'Length' - constant representing the number of instances to
 ///                   fold in a single `prove`
 #[derive(Clone, Debug)]
-pub struct ProtoGalaxy<C: CurveAffine, const L: usize> {
+pub struct ProtoGalaxy<C: BDCurveAffine, const L: usize> {
     _marker: PhantomData<C>,
 }
 
-impl<C: CurveAffine, const L: usize> ProtoGalaxy<C, L> {
+impl<C: BDCurveAffine, const L: usize> ProtoGalaxy<C, L> {
     #[instrument(skip_all)]
     pub(crate) fn generate_challenge<'i>(
         pp_digest: &C,
@@ -103,6 +105,9 @@ impl<C: CurveAffine, const L: usize> ProtoGalaxy<C, L> {
                 u: acc.U.u * l_0,
                 // Ignore for protogalaxy
                 E_commitment: C::identity(),
+                g1_elements: acc.U.g1_elements.clone(),
+                g2_elements: acc.U.g2_elements.clone(),
+                gt_element: acc.U.gt_element.clone(),
             },
             W: RelaxedPlonkWitness {
                 W: acc
@@ -125,6 +130,8 @@ impl<C: CurveAffine, const L: usize> ProtoGalaxy<C, L> {
                             W_commitments,
                             instance,
                             challenges,
+                            g1_elements: _,
+                            g2_elements: _,
                         },
                     w: PlonkWitness { W },
                 } = tr;
@@ -190,7 +197,7 @@ pub enum Error {
     Poly(#[from] poly::Error),
 }
 
-impl<C: CurveAffine, const L: usize> FoldingScheme<C, L> for ProtoGalaxy<C, L> {
+impl<C: BDCurveAffine, const L: usize> FoldingScheme<C, L> for ProtoGalaxy<C, L> {
     type Error = Error;
     type ProverParam = ProtoGalaxyProverParam<C>;
     type VerifierParam = C;

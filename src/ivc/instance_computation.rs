@@ -7,11 +7,12 @@ use super::fold_relaxed_plonk_instance_chip::AssignedRelaxedPlonkInstance;
 use crate::{
     constants::NUM_CHALLENGE_BITS,
     ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
-    gadgets::{ecc::AssignedPoint, nonnative::bn::big_uint::BigUint},
+    gadgets::{ecc::AssignedPoint, ecc2::G2Point, fp12::Tuple12, nonnative::bn::big_uint::BigUint},
     halo2curves::CurveAffine,
     main_gate::{AssignedValue, MainGate, MainGateConfig, RegionCtx, WrapValue},
     plonk::RelaxedPlonkInstance,
     poseidon::{AbsorbInRO, ROCircuitTrait, ROTrait},
+    traits::BDCurveAffine,
     util,
 };
 
@@ -23,6 +24,7 @@ pub(crate) struct AssignedRandomOracleComputationInstance<
     C: CurveAffine,
 > where
     C::Base: FromUniformBytes<64> + PrimeFieldBits,
+    C::ScalarExt: PrimeFieldBits,
     RP: ROCircuitTrait<C::Base, Config = MainGateConfig<T>>,
 {
     pub random_oracle_constant: RP::Args,
@@ -37,6 +39,7 @@ impl<'l, const A: usize, const T: usize, C: CurveAffine, RO>
     AssignedRandomOracleComputationInstance<'l, RO, A, T, C>
 where
     C::Base: FromUniformBytes<64> + PrimeFieldBits,
+    C::ScalarExt: PrimeFieldBits,
     RO: ROCircuitTrait<C::Base, Config = MainGateConfig<T>>,
 {
     pub fn generate_with_inspect(
@@ -68,7 +71,7 @@ where
 pub(crate) struct RandomOracleComputationInstance<'l, const A: usize, C, RP>
 where
     RP: ROTrait<C::Base>,
-    C: CurveAffine + Serialize,
+    C: BDCurveAffine + Serialize,
 {
     pub random_oracle_constant: RP::Constants,
     pub public_params_hash: &'l C,
@@ -83,18 +86,21 @@ where
 impl<'l, C, RP, const A: usize> RandomOracleComputationInstance<'l, A, C, RP>
 where
     RP: ROTrait<C::Base>,
-    C: CurveAffine + Serialize,
+    C: BDCurveAffine + Serialize,
 {
     pub fn generate_with_inspect<F: PrimeField>(self, inspect: impl FnOnce(&[C::Base])) -> F {
-        pub struct RelaxedPlonkInstanceBigUintView<'l, C: CurveAffine> {
+        pub struct RelaxedPlonkInstanceBigUintView<'l, C: BDCurveAffine> {
             pub(crate) W_commitments: &'l Vec<C>,
             pub(crate) E_commitment: &'l C,
             pub(crate) instance: Vec<BigUint<C::Base>>,
             pub(crate) challenges: Vec<BigUint<C::Base>>,
             pub(crate) u: &'l C::ScalarExt,
+            pub(crate) g1_elements: &'l Vec<C>,
+            pub(crate) g2_elements: &'l Vec<G2Point<C, C::ScalarExt>>,
+            pub(crate) gt_element: &'l Tuple12<C>,
         }
 
-        impl<'l, C: CurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO>
+        impl<'l, C: BDCurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO>
             for RelaxedPlonkInstanceBigUintView<'l, C>
         {
             fn absorb_into(&self, ro: &mut RO) {
@@ -112,7 +118,10 @@ where
                             .flat_map(|bn| bn.limbs().iter())
                             .copied(),
                     )
-                    .absorb_field(util::fe_to_fe(self.u).unwrap());
+                    .absorb_field(util::fe_to_fe(self.u).unwrap())
+                    .absorb_point_iter(self.g1_elements.iter())
+                    .absorb_g2_point_iter(self.g2_elements.iter())
+                    .absorb_fp12_tuple(self.gt_element);
             }
         }
 
@@ -146,6 +155,9 @@ where
                 })
                 .collect(),
             u: &self.relaxed.u,
+            g1_elements: &self.relaxed.g1_elements,
+            g2_elements: &self.relaxed.g2_elements,
+            gt_element: &self.relaxed.gt_element,
         };
 
         util::fe_to_fe(
@@ -192,6 +204,7 @@ mod tests {
     use super::*;
     use crate::{
         commitment::CommitmentKey,
+        gadgets::{ecc2::G2Point, fp12::Tuple12},
         ivc::fold_relaxed_plonk_instance_chip::{
             assign_next_advice_from_point, FoldRelaxedPlonkInstanceChip,
         },
@@ -216,6 +229,9 @@ mod tests {
             instance: vec![Scalar::from_u128(0x67899); 2],
             challenges: vec![Scalar::from_u128(0x123456); 10],
             u: Scalar::from_u128(u128::MAX),
+            g1_elements: vec![C1::random(&mut rand::thread_rng()); 10],
+            g2_elements: vec![G2Point::<C1, Scalar>::random(&mut rand::thread_rng()); 10],
+            gt_element: Tuple12::<C1>::default(),
         };
 
         let off_circuit_hash: Base = RandomOracleComputationInstance::<

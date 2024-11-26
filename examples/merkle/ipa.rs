@@ -14,12 +14,12 @@ use halo2_proofs::{
         Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
     },
 };
-use rand_core::OsRng;
-use sirius::{
+use mira::{
     self,
     group::{prime::PrimeCurve, Group},
     halo2curves::bn256,
 };
+use rand_core::OsRng;
 use tracing::*;
 
 use crate::circuit::MerkleTreeUpdateCircuit;

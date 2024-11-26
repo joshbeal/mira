@@ -15,8 +15,8 @@ use halo2_proofs::{
     },
     SerdeFormat,
 };
+use mira::group::{prime::PrimeCurve, Group};
 use rand_core::OsRng;
-use sirius::group::{prime::PrimeCurve, Group};
 use tracing::*;
 
 use crate::circuit::MerkleTreeUpdateCircuit;

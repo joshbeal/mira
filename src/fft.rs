@@ -174,7 +174,7 @@ pub fn ifft<F: PrimeField>(a: &mut [F], log_n: u32) {
 }
 
 /// coset FFT
-/// input `a` corresponds to coefficients of a polynoimal
+/// input `a` corresponds to coefficients of a polynomial
 pub fn coset_fft<F: WithSmallOrderMulGroup<3>>(a: &mut [F]) {
     assert!(a.len().is_power_of_two());
     let log_n = a.len().ilog2();
@@ -185,7 +185,7 @@ pub fn coset_fft<F: WithSmallOrderMulGroup<3>>(a: &mut [F]) {
 }
 
 /// coset IFFT
-/// input `a` corresponds to values of a polynoimal on coset domain zeta*{1,omega,omega^2,...}
+/// input `a` corresponds to values of a polynomial on coset domain zeta*{1,omega,omega^2,...}
 pub fn coset_ifft<F: WithSmallOrderMulGroup<3>>(a: &mut [F]) -> UnivariatePoly<F> {
     assert!(a.len().is_power_of_two());
     let log_n = a.len().ilog2();

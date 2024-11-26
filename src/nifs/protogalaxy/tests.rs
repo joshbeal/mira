@@ -69,8 +69,9 @@ struct Mock<CIRCUIT: Circuit<Scalar>> {
 
 impl<C: Circuit<Scalar>> Mock<C> {
     pub fn new(k_table_size: u32, circuits: [(C, Vec<Scalar>); L]) -> Self {
-        let circuits_runners =
-            circuits.map(|(circuit, instance)| CircuitRunner::new(k_table_size, circuit, instance));
+        let circuits_runners = circuits.map(|(circuit, instance)| {
+            CircuitRunner::new(k_table_size, circuit, instance, 0, 0, 0, 0)
+        });
 
         let ck = setup_smallest_commitment_key(k_table_size, &circuits_runners[0].cs, b"");
         let S = circuits_runners[0]

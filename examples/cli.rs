@@ -12,12 +12,13 @@ use std::{
 use clap::{Parser, ValueEnum};
 use git2::Repository;
 use halo2_proofs::halo2curves;
-use poseidon::poseidon_step_circuit::TestPoseidonCircuit;
-use sirius::{
+use mira::{
     ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
+    gadgets::Tree,
     ivc::{step_circuit::trivial, CircuitPublicParamsInput, PublicParams, StepCircuit, IVC},
     poseidon::ROPair,
 };
+use poseidon::poseidon_step_circuit::TestPoseidonCircuit;
 use tracing::*;
 use tracing_subscriber::{filter::LevelFilter, fmt::format::FmtSpan, EnvFilter};
 
@@ -27,7 +28,11 @@ mod poseidon;
 #[allow(dead_code)]
 mod merkle;
 
-use merkle::{MerkleTreeUpdateCircuit, Tree};
+#[allow(dead_code)]
+mod groth16;
+
+use groth16::Groth16AggregateCircuit;
+use merkle::MerkleTreeUpdateCircuit;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -36,6 +41,14 @@ struct Args {
     primary_circuit: Circuits,
     #[arg(long, default_value_t = 17)]
     primary_circuit_k_table_size: u32,
+    #[arg(long, default_value_t = 0)]
+    primary_circuit_num_g1: u32,
+    #[arg(long, default_value_t = 0)]
+    primary_circuit_num_g2: u32,
+    #[arg(long, default_value_t = 0)]
+    primary_circuit_gt_degree: u32,
+    #[arg(long, default_value_t = 0)]
+    primary_circuit_gt_cross_terms: u32,
     #[arg(long, default_value_t = 21)]
     primary_commitment_key_size: usize,
     #[arg(long, default_value_t = 1)]
@@ -48,6 +61,14 @@ struct Args {
     secondary_circuit: Circuits,
     #[arg(long, default_value_t = 17)]
     secondary_circuit_k_table_size: u32,
+    #[arg(long, default_value_t = 0)]
+    secondary_circuit_num_g1: u32,
+    #[arg(long, default_value_t = 0)]
+    secondary_circuit_num_g2: u32,
+    #[arg(long, default_value_t = 0)]
+    secondary_circuit_gt_degree: u32,
+    #[arg(long, default_value_t = 0)]
+    secondary_circuit_gt_cross_terms: u32,
     #[arg(long, default_value_t = 21)]
     secondary_commitment_key_size: usize,
     #[arg(long, default_value_t = 1)]
@@ -158,6 +179,7 @@ enum Circuits {
     Poseidon,
     Trivial,
     MerkleTree,
+    Groth16,
 }
 
 impl fmt::Display for Circuits {
@@ -169,6 +191,7 @@ impl fmt::Display for Circuits {
                 Self::Poseidon => "poseidon",
                 Self::Trivial => "trivial",
                 Self::MerkleTree => "merkle",
+                Self::Groth16 => "groth16",
             }
         )
     }
@@ -181,7 +204,7 @@ use halo2curves::{bn256, grumpkin};
 const MAIN_GATE_SIZE: usize = 5;
 const RATE: usize = 4;
 
-type RandomOracle = sirius::poseidon::PoseidonRO<MAIN_GATE_SIZE, RATE>;
+type RandomOracle = mira::poseidon::PoseidonRO<MAIN_GATE_SIZE, RATE>;
 type RandomOracleConstant<F> = <RandomOracle as ROPair<F>>::Args;
 
 type C1Affine = <C1 as halo2curves::group::prime::PrimeCurve>::Affine;
@@ -211,6 +234,22 @@ where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {
     const NAME: &'static str = "MerkleTree";
+
+    fn get_default_input() -> F {
+        *Tree::default().get_root()
+    }
+
+    #[instrument("update_leaves", skip_all)]
+    fn update_between_step(&mut self) {
+        assert!(self.pop_front_proof_batch())
+    }
+}
+
+impl<F> TestCircuitHelpers<F> for Groth16AggregateCircuit<F>
+where
+    F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
+{
+    const NAME: &'static str = "Groth16";
 
     fn get_default_input() -> F {
         *Tree::default().get_root()
@@ -262,12 +301,20 @@ fn fold<
     >::new(
         CircuitPublicParamsInput::new(
             args.primary_circuit_k_table_size,
+            args.primary_circuit_num_g1,
+            args.primary_circuit_num_g2,
+            args.primary_circuit_gt_degree,
+            args.primary_circuit_gt_cross_terms,
             &primary_commitment_key,
             primary_spec,
             &primary,
         ),
         CircuitPublicParamsInput::new(
             args.secondary_circuit_k_table_size,
+            args.secondary_circuit_num_g1,
+            args.secondary_circuit_num_g2,
+            args.secondary_circuit_gt_degree,
+            args.secondary_circuit_gt_cross_terms,
             &secondary_commitment_key,
             secondary_spec,
             &secondary,
@@ -281,6 +328,7 @@ fn fold<
     let secondary_input = SC2::get_default_input();
 
     let prove_span = info_span!("prove", steps = args.fold_step_count.get()).entered();
+    println!("fold_step_count {}", args.fold_step_count);
 
     let mut ivc = IVC::new(
         &pp,
@@ -383,6 +431,81 @@ fn main() {
             merkle::MerkleTreeUpdateCircuit::new_with_random_updates(
                 &mut rng,
                 args.secondary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+        ),
+        (Circuits::Groth16, Circuits::Trivial) => fold(
+            &args,
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+            trivial::Circuit::default(),
+        ),
+        (Circuits::Groth16, Circuits::Poseidon) => fold(
+            &args,
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+            TestPoseidonCircuit::new(args.secondary_repeat_count),
+        ),
+        (Circuits::Groth16, Circuits::MerkleTree) => fold(
+            &args,
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+            merkle::MerkleTreeUpdateCircuit::new_with_random_updates(
+                &mut rng,
+                args.secondary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+        ),
+        (Circuits::Groth16, Circuits::Groth16) => fold(
+            &args,
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+        ),
+        (Circuits::Poseidon, Circuits::Groth16) => fold(
+            &args,
+            TestPoseidonCircuit::new(args.primary_repeat_count),
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+        ),
+        (Circuits::Trivial, Circuits::Groth16) => fold(
+            &args,
+            trivial::Circuit::default(),
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+        ),
+        (Circuits::MerkleTree, Circuits::Groth16) => fold(
+            &args,
+            merkle::MerkleTreeUpdateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
+                args.fold_step_count.get(),
+            ),
+            groth16::Groth16AggregateCircuit::new_with_random_updates(
+                &mut rng,
+                args.primary_repeat_count,
                 args.fold_step_count.get(),
             ),
         ),

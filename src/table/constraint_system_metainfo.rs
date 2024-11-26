@@ -13,6 +13,10 @@ pub(crate) struct ConstraintSystemMetainfo<F: PrimeField> {
     pub folding_degree: usize,
     pub gates: Vec<Expression<F>>,
     pub custom_gates_lookup_compressed: CompressedGates<F>,
+    pub num_g1_elements: usize,
+    pub num_g2_elements: usize,
+    pub target_group_folding_degree: usize,
+    pub target_group_cross_terms: usize,
 }
 
 impl<F: PrimeField> ConstraintSystemMetainfo<F> {
@@ -20,11 +24,12 @@ impl<F: PrimeField> ConstraintSystemMetainfo<F> {
     /// it is used to kickstart the Folding Circuit initialization
     pub(crate) fn build(
         k_table_size: usize,
+        num_g1_elems: usize,
+        num_g2_elems: usize,
+        target_group_folding_degree: usize,
+        target_group_cross_terms: usize,
         cs: &ConstraintSystem<F>,
     ) -> ConstraintSystemMetainfo<F> {
-        let num_gates: usize = cs.gates().iter().map(|gate| gate.polynomials().len()).sum();
-        info!("start build constraint system metainfo with {num_gates} custom gates");
-
         let (num_lookups, has_vector_lookup, lookup_exprs) = lookup::Arguments::compress_from(cs)
             .as_ref()
             .map(|arg| {
@@ -55,6 +60,7 @@ impl<F: PrimeField> ConstraintSystemMetainfo<F> {
 
         // we have at most 3 prover rounds
         let nrow = 1 << k_table_size;
+        println!("nrow {}", nrow);
 
         let mut round_sizes = Vec::new();
 
@@ -105,6 +111,10 @@ impl<F: PrimeField> ConstraintSystemMetainfo<F> {
             folding_degree,
             gates,
             custom_gates_lookup_compressed,
+            num_g1_elements: num_g1_elems,
+            num_g2_elements: num_g2_elems,
+            target_group_folding_degree,
+            target_group_cross_terms,
         }
     }
 }

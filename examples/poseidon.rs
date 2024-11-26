@@ -6,7 +6,7 @@ pub mod poseidon_step_circuit {
         circuit::{AssignedCell, Layouter},
         plonk::ConstraintSystem,
     };
-    use sirius::{
+    use mira::{
         ff::{FromUniformBytes, PrimeFieldBits},
         ivc::{StepCircuit, SynthesisError},
         main_gate::{MainGate, MainGateConfig, RegionCtx, WrapValue},
@@ -123,7 +123,7 @@ use std::{array, env, io, num::NonZeroUsize, path::Path};
 use bn256::G1 as C1;
 use grumpkin::G1 as C2;
 use metadata::LevelFilter;
-use sirius::{
+use mira::{
     commitment::CommitmentKey,
     group::{prime::PrimeCurve, Group},
     halo2curves::{bn256, grumpkin, CurveAffine},
@@ -227,12 +227,20 @@ fn main() {
     >::new(
         CircuitPublicParamsInput::new(
             PRIMARY_CIRCUIT_TABLE_SIZE as u32,
+            0,
+            0,
+            0,
+            0,
             &primary_commitment_key,
             primary_spec,
             &primary,
         ),
         CircuitPublicParamsInput::new(
             SECONDARY_CIRCUIT_TABLE_SIZE as u32,
+            0,
+            0,
+            0,
+            0,
             &secondary_commitment_key,
             secondary_spec,
             &secondary,

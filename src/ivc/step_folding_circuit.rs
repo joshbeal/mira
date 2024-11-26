@@ -12,6 +12,7 @@ use tracing::*;
 use super::instance_computation::AssignedRandomOracleComputationInstance;
 use crate::{
     ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits},
+    gadgets::fp12::Tuple12,
     halo2curves::CurveAffine,
     ivc::{
         fold_relaxed_plonk_instance_chip::{
@@ -79,6 +80,7 @@ where
 pub(crate) struct StepInputs<'link, const ARITY: usize, C, RO>
 where
     C::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C::ScalarExt: PrimeFieldBits,
     C: CurveAffine,
     RO: ROCircuitTrait<C::Base>,
 {
@@ -98,16 +100,24 @@ where
 
     // TODO docs
     pub cross_term_commits: Vec<C>,
+
+    // TODO docs
+    pub cross_term_gt_commits: Vec<Tuple12<C>>,
 }
 
 impl<'link, const ARITY: usize, C, RO> StepInputs<'link, ARITY, C, RO>
 where
     C::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C::ScalarExt: PrimeFieldBits,
     C: CurveAffine,
     RO: ROCircuitTrait<C::Base>,
 {
     pub fn without_witness<PairedCircuit: Circuit<C::Scalar>>(
         k_table_size: u32,
+        num_g1_elems: u32,
+        num_g2_elems: u32,
+        gt_degree: u32,
+        gt_cross_terms: u32,
         num_io: usize,
         step_pp: &'link StepParams<C::Base, RO>,
     ) -> Self {
@@ -119,8 +129,18 @@ where
             num_challenges,
             round_sizes,
             folding_degree,
+            target_group_cross_terms,
+            num_g1_elements,
+            num_g2_elements,
             ..
-        } = ConstraintSystemMetainfo::build(k_table_size as usize, &cs);
+        } = ConstraintSystemMetainfo::build(
+            k_table_size as usize,
+            num_g1_elems as usize,
+            num_g2_elems as usize,
+            gt_degree as usize,
+            gt_cross_terms as usize,
+            &cs,
+        );
 
         Self {
             step: C::Base::ZERO,
@@ -128,9 +148,22 @@ where
             public_params_hash: C::identity(),
             z_0: [C::Base::ZERO; ARITY],
             z_i: [C::Base::ZERO; ARITY],
-            U: RelaxedPlonkInstance::new(num_io, num_challenges, round_sizes.len()),
-            u: PlonkInstance::new(num_io, num_challenges, round_sizes.len()),
+            U: RelaxedPlonkInstance::new(
+                num_io,
+                num_challenges,
+                round_sizes.len(),
+                num_g1_elements,
+                num_g2_elements,
+            ),
+            u: PlonkInstance::new(
+                num_io,
+                num_challenges,
+                round_sizes.len(),
+                num_g1_elements,
+                num_g2_elements,
+            ),
             cross_term_commits: vec![C::identity(); folding_degree.saturating_sub(1)],
+            cross_term_gt_commits: vec![Tuple12::<C>::one(); target_group_cross_terms],
         }
     }
 }
@@ -217,15 +250,23 @@ where
                 z_0: [C::Base::ZERO; ARITY],
                 z_i: [C::Base::ZERO; ARITY],
                 cross_term_commits: vec![C::identity(); self.input.cross_term_commits.len()],
+                cross_term_gt_commits: vec![
+                    Tuple12::<C>::one();
+                    self.input.cross_term_gt_commits.len()
+                ],
                 U: RelaxedPlonkInstance::new(
                     self.input.U.instance.len(),
                     self.input.U.challenges.len(),
                     self.input.U.W_commitments.len(),
+                    self.input.U.g1_elements.len(),
+                    self.input.U.g2_elements.len(),
                 ),
                 u: PlonkInstance::new(
                     self.input.u.instance.len(),
                     self.input.u.challenges.len(),
                     self.input.u.W_commitments.len(),
+                    self.input.u.g1_elements.len(),
+                    self.input.u.g2_elements.len(),
                 ),
             },
         }
@@ -295,6 +336,7 @@ where
                         &self.input.public_params_hash,
                         &self.input.u,
                         &self.input.cross_term_commits,
+                        &self.input.cross_term_gt_commits,
                         RO::new(
                             config.main_gate_config.clone(),
                             self.input.step_pp.ro_constant.clone(),

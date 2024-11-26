@@ -16,6 +16,7 @@ pub mod polynomial;
 pub mod poseidon;
 pub mod sps;
 pub mod table;
+pub mod traits;
 pub mod util;
 
 pub mod error;

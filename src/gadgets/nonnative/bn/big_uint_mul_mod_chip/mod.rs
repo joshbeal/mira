@@ -1116,10 +1116,10 @@ impl<F: PrimeField> BigUintMulModChip<F> {
                     };
 
                 debug!(
-                    "Previos partial sum: {:?}",
+                    "Previous partial sum: {:?}",
                     prev_partial_sum.as_ref().and_then(|c| c.value().unwrap())
                 );
-                debug!("Previos shifted partial sum: {:?}", shifted_prev.unwrap());
+                debug!("Previous shifted partial sum: {:?}", shifted_prev.unwrap());
 
                 ctx.assign_fixed(
                     || format!("sum of limbs from 0 to {limb_index} selector",),

@@ -61,6 +61,18 @@ where
     pub fn k_table_size(&self) -> u32 {
         self.S.k as u32
     }
+    pub fn num_g1_elems(&self) -> u32 {
+        self.S.num_g1_elems as u32
+    }
+    pub fn num_g2_elems(&self) -> u32 {
+        self.S.num_g2_elems as u32
+    }
+    pub fn gt_degree(&self) -> u32 {
+        self.S.target_group_folding_degree as u32
+    }
+    pub fn gt_cross_terms(&self) -> u32 {
+        self.S.target_group_cross_terms as u32
+    }
     pub fn ck(&self) -> &'key CommitmentKey<C> {
         self.ck
     }
@@ -198,14 +210,23 @@ pub struct CircuitPublicParamsInput<
     step_circuit: &'circuit SC,
     commitment_key: &'key CommitmentKey<C>,
     k_table_size: u32,
+    num_g1: u32,
+    num_g2: u32,
+    gt_degree: u32,
+    gt_cross_terms: u32,
     ro_constant: RPArgs,
 }
 
 impl<'key, 'circuit, const A: usize, C: CurveAffine, RPArgs, SC: StepCircuit<A, C::Scalar>>
     CircuitPublicParamsInput<'key, 'circuit, A, C, RPArgs, SC>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         k_table_size: u32,
+        num_g1: u32,
+        num_g2: u32,
+        gt_degree: u32,
+        gt_cross_terms: u32,
         commitment_key: &'key CommitmentKey<C>,
         ro_constant: RPArgs,
         step_circuit: &'circuit SC,
@@ -213,6 +234,10 @@ impl<'key, 'circuit, const A: usize, C: CurveAffine, RPArgs, SC: StepCircuit<A, 
         Self {
             commitment_key,
             k_table_size,
+            num_g1,
+            num_g2,
+            gt_degree,
+            gt_cross_terms,
             step_circuit,
             ro_constant,
         }
@@ -262,11 +287,19 @@ where
                         StepFoldingCircuit<'_, A2, C1, SC2, RP2::OnCircuit, MAIN_GATE_T>,
                     >(
                         primary.k_table_size,
+                        primary.num_g1,
+                        primary.num_g2,
+                        primary.gt_degree,
+                        primary.gt_cross_terms,
                         NUM_IO,
                         &StepParams::new(limb_width, limbs_count, primary.ro_constant.clone()),
                     ),
                 },
                 vec![C1::Scalar::ZERO; NUM_IO],
+                primary.num_g1,
+                primary.num_g2,
+                primary.gt_degree,
+                primary.gt_cross_terms,
             )
             .try_collect_plonk_structure()
         }?;
@@ -281,6 +314,10 @@ where
                 StepFoldingCircuit<'_, A1, C2, SC1, RP1::OnCircuit, MAIN_GATE_T>,
             >(
                 secondary.k_table_size,
+                secondary.num_g1,
+                secondary.num_g2,
+                secondary.gt_degree,
+                secondary.gt_cross_terms,
                 NUM_IO,
                 &secondary_initial_step_params,
             );
@@ -311,6 +348,10 @@ where
                 secondary.k_table_size,
                 secondary_sfc,
                 vec![C2::Scalar::ZERO; NUM_IO],
+                secondary.num_g1,
+                secondary.num_g2,
+                secondary.gt_degree,
+                secondary.gt_cross_terms,
             );
 
             let secondary_S = secondary_cr.try_collect_plonk_structure()?;
@@ -470,7 +511,7 @@ mod pp_test {
         let spec1 = RandomOracleConstant::<5, 4, Scalar1>::new(10, 10);
         let spec2 = RandomOracleConstant::<5, 4, Scalar2>::new(10, 10);
 
-        const K: usize = 17;
+        const K: usize = 18;
 
         PublicParams::<
             '_,
@@ -487,12 +528,20 @@ mod pp_test {
             CircuitPublicParamsInput {
                 step_circuit: &trivial::Circuit::default(),
                 k_table_size: K as u32,
+                num_g1: 2,
+                num_g2: 1,
+                gt_degree: 2,
+                gt_cross_terms: 1,
                 commitment_key: &get_or_create_commitment_key(K + 3, "bn256").unwrap(),
                 ro_constant: spec1,
             },
             CircuitPublicParamsInput {
                 step_circuit: &trivial::Circuit::default(),
                 k_table_size: K as u32,
+                num_g1: 2,
+                num_g2: 1,
+                gt_degree: 2,
+                gt_cross_terms: 1,
                 commitment_key: &get_or_create_commitment_key(K + 3, "grumpkin").unwrap(),
                 ro_constant: spec2,
             },

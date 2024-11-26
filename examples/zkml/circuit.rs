@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, iter};
 
+use rand::Rng;
+
 use mira::{
     gadgets::merkle_tree_gadget::{
         chip::MerkleTreeUpdateChip,
@@ -11,7 +13,7 @@ use mira::{
     ivc::{StepCircuit, SynthesisError},
     main_gate::{MainGate, RegionCtx},
 };
-use rand::Rng;
+
 use tracing::info;
 
 const INDEX_LIMIT: u32 = 1 << 31;
@@ -19,7 +21,7 @@ const ARITY: usize = 1;
 
 type ProofBatch<F> = Box<[Proof<F>]>;
 
-pub struct MerkleTreeUpdateCircuit<F>
+pub struct ProgramCounterUpdateCircuit<F>
 where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {
@@ -28,7 +30,7 @@ where
     batch_size: usize,
 }
 
-impl<F> Default for MerkleTreeUpdateCircuit<F>
+impl<F> Default for ProgramCounterUpdateCircuit<F>
 where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {
@@ -36,12 +38,12 @@ where
         Self {
             tree: Default::default(),
             proofs_batches: VecDeque::new(),
-            batch_size: 2,
+            batch_size: 1,
         }
     }
 }
 
-impl<F> MerkleTreeUpdateCircuit<F>
+impl<F> ProgramCounterUpdateCircuit<F>
 where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {
@@ -51,6 +53,7 @@ where
             ..Default::default()
         }
     }
+
     pub fn new_with_random_updates(
         rng: &mut impl Rng,
         batch_size: usize,
@@ -60,6 +63,20 @@ where
 
         for _ in 0..=batches_count {
             self_.random_update_leaves(rng);
+        }
+
+        self_
+    }
+
+    pub fn new_with_updates(
+        updates: &Vec<Vec<(u32, F)>>,
+        batch_size: usize,
+        batches_count: usize,
+    ) -> Self {
+        let mut self_ = Self::new(batch_size);
+
+        for i in 0..=batches_count {
+            self_.update_leaves(updates[i].iter().cloned());
         }
 
         self_
@@ -81,12 +98,15 @@ where
         }));
     }
 
-    fn update_leaves(&mut self, update: impl Iterator<Item = (u32, F)>) -> (F, F) {
-        assert!(update.size_hint().0 >= self.batch_size);
-        let proofs = update
-            .map(|(index, data)| self.tree.update_leaf(index, data))
+    pub fn update_leaves(&mut self, update: impl Iterator<Item = (u32, F)>) -> (F, F) {
+        let proofs: Box<[_]> = update
             .take(self.batch_size)
-            .collect::<Box<[_]>>();
+            .map(|(index, data)| self.tree.update_leaf(index, data))
+            .collect();
+
+        if proofs.is_empty() {
+            panic!("No updates provided");
+        }
 
         let old = proofs.first().unwrap().root().old;
         let new = proofs.last().unwrap().root().new;
@@ -97,7 +117,7 @@ where
     }
 }
 
-impl<F> StepCircuit<1, F> for MerkleTreeUpdateCircuit<F>
+impl<F> StepCircuit<1, F> for ProgramCounterUpdateCircuit<F>
 where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {
@@ -143,7 +163,7 @@ where
     }
 }
 
-impl<F> Circuit<F> for MerkleTreeUpdateCircuit<F>
+impl<F> Circuit<F> for ProgramCounterUpdateCircuit<F>
 where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {

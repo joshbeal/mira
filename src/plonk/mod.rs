@@ -14,10 +14,11 @@
 //!
 //! Additionally, it defines a method is_sat on PlonkStructure to determine if
 //! a given Plonk instance and witness satisfy the circuit constraints.
+use rand::thread_rng;
 use std::{iter, num::NonZeroUsize, time::Instant};
 
 use count_to_non_zero::*;
-use halo2_proofs::arithmetic::{best_multiexp, CurveAffine};
+use halo2_proofs::arithmetic::best_multiexp;
 use itertools::Itertools;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -29,6 +30,7 @@ use crate::{
     concat_vec,
     constants::NUM_CHALLENGE_BITS,
     ff::{Field, PrimeField},
+    gadgets::{ecc::Point, ecc2::G2Point, fp12::Tuple12},
     plonk::{
         self,
         eval::{Error as EvalError, GetDataForEval, PlonkEvalDomain},
@@ -42,6 +44,7 @@ use crate::{
     },
     poseidon::{AbsorbInRO, ROTrait},
     sps::{Error as SpsError, SpecialSoundnessVerifier},
+    traits::BDCurveAffine,
     util::{concatenate_with_padding, fe_to_fe},
 };
 
@@ -153,7 +156,12 @@ pub struct PlonkStructure<F: PrimeField> {
 
     pub(crate) custom_gates_lookup_compressed: CompressedGates<F>,
 
-    /// TODO #262: after we switch from Sangaria IVC to IVC with cyclefold + protogalaxy
+    pub(crate) num_g1_elems: usize,
+    pub(crate) num_g2_elems: usize,
+    pub(crate) target_group_folding_degree: usize,
+    pub(crate) target_group_cross_terms: usize,
+
+    /// TODO #262: after we switch from Sangria IVC to IVC with cyclefold + protogalaxy
     /// we will remove the field custom_gates_lookup_compressed and make gates field serializable
     /// instead
     /// we use uncompressed gates instead of
@@ -166,7 +174,7 @@ pub struct PlonkStructure<F: PrimeField> {
 }
 
 #[derive(Clone, Debug)]
-pub struct PlonkInstance<C: CurveAffine> {
+pub struct PlonkInstance<C: BDCurveAffine> {
     /// `W_commitments = round_sizes.len()`, see [`PlonkStructure::round_sizes`]
     pub(crate) W_commitments: Vec<C>,
     /// inst = [X0, X1]
@@ -179,14 +187,19 @@ pub struct PlonkInstance<C: CurveAffine> {
     /// r3: combine all custom gates (P_i) and lookup relations (L_i), e.g.:
     /// (P_1, P_2, L_1, L_2) -> P_1 + r3*P_2 + r3^2*L_1 + r3^3*L_2
     pub(crate) challenges: Vec<C::ScalarExt>,
+    /// group messages
+    pub(crate) g1_elements: Vec<C>,
+    pub(crate) g2_elements: Vec<G2Point<C, C::ScalarExt>>,
 }
 
-impl<C: CurveAffine> Default for PlonkInstance<C> {
+impl<C: BDCurveAffine> Default for PlonkInstance<C> {
     fn default() -> Self {
         Self {
             W_commitments: vec![],
             instance: vec![C::ScalarExt::ZERO, C::ScalarExt::ZERO], // TODO Fix Me
             challenges: vec![],
+            g1_elements: vec![],
+            g2_elements: vec![],
         }
     }
 }
@@ -213,7 +226,7 @@ impl<F: PrimeField> PlonkWitness<F> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RelaxedPlonkInstance<C: CurveAffine> {
+pub struct RelaxedPlonkInstance<C: BDCurveAffine> {
     pub(crate) W_commitments: Vec<C>,
     pub(crate) E_commitment: C,
     pub(crate) instance: Vec<C::ScalarExt>,
@@ -221,6 +234,11 @@ pub struct RelaxedPlonkInstance<C: CurveAffine> {
     pub(crate) challenges: Vec<C::ScalarExt>,
     /// homogenous variable u
     pub(crate) u: C::ScalarExt,
+    /// group messages
+    pub(crate) g1_elements: Vec<C>,
+    pub(crate) g2_elements: Vec<G2Point<C, C::ScalarExt>>,
+    /// group error term
+    pub(crate) gt_element: Tuple12<C>,
 }
 
 #[derive(Clone, Debug)]
@@ -232,7 +250,7 @@ pub struct RelaxedPlonkWitness<F: PrimeField> {
 
 // TODO #31 docs
 #[derive(Debug, Clone)]
-pub struct RelaxedPlonkTrace<C: CurveAffine> {
+pub struct RelaxedPlonkTrace<C: BDCurveAffine> {
     pub U: RelaxedPlonkInstance<C>,
     pub W: RelaxedPlonkWitness<C::Scalar>,
 }
@@ -244,6 +262,8 @@ pub struct RelaxedPlonkTraceArgs {
     num_witness: usize,
     k_table_size: usize,
     round_sizes: Box<[usize]>,
+    num_g1_elems: usize,
+    num_g2_elems: usize,
 }
 
 impl<F: PrimeField> From<&PlonkStructure<F>> for RelaxedPlonkTraceArgs {
@@ -254,20 +274,28 @@ impl<F: PrimeField> From<&PlonkStructure<F>> for RelaxedPlonkTraceArgs {
             num_witness: value.round_sizes.len(),
             k_table_size: value.k,
             round_sizes: value.round_sizes.clone().into_boxed_slice(),
+            num_g1_elems: value.num_g1_elems,
+            num_g2_elems: value.num_g2_elems,
         }
     }
 }
 
-impl<C: CurveAffine> RelaxedPlonkTrace<C> {
+impl<C: BDCurveAffine> RelaxedPlonkTrace<C> {
     pub fn new(args: RelaxedPlonkTraceArgs) -> Self {
         Self {
-            U: RelaxedPlonkInstance::new(args.num_io, args.num_challenges, args.num_witness),
+            U: RelaxedPlonkInstance::new(
+                args.num_io,
+                args.num_challenges,
+                args.num_witness,
+                args.num_g1_elems,
+                args.num_g2_elems,
+            ),
             W: RelaxedPlonkWitness::new(args.k_table_size, &args.round_sizes),
         }
     }
 }
 
-impl<C: CurveAffine> From<&PlonkStructure<C::ScalarExt>> for RelaxedPlonkTrace<C> {
+impl<C: BDCurveAffine> From<&PlonkStructure<C::ScalarExt>> for RelaxedPlonkTrace<C> {
     fn from(value: &PlonkStructure<C::ScalarExt>) -> Self {
         Self::new(RelaxedPlonkTraceArgs::from(value))
     }
@@ -275,7 +303,7 @@ impl<C: CurveAffine> From<&PlonkStructure<C::ScalarExt>> for RelaxedPlonkTrace<C
 
 // TODO #31 docs
 #[derive(Debug, Clone)]
-pub struct PlonkTrace<C: CurveAffine> {
+pub struct PlonkTrace<C: BDCurveAffine> {
     pub u: PlonkInstance<C>,
     pub w: PlonkWitness<C::Scalar>,
 }
@@ -300,12 +328,13 @@ impl<F: PrimeField> GetWitness<F> for RelaxedPlonkWitness<F> {
         &self.W
     }
 }
-impl<C: CurveAffine> GetWitness<C::ScalarExt> for PlonkTrace<C> {
+impl<C: BDCurveAffine> GetWitness<C::Scalar> for PlonkTrace<C> {
     fn get_witness(&self) -> &[Vec<C::ScalarExt>] {
         self.w.get_witness()
     }
 }
-impl<C: CurveAffine> GetWitness<C::ScalarExt> for RelaxedPlonkTrace<C> {
+
+impl<C: BDCurveAffine> GetWitness<C::Scalar> for RelaxedPlonkTrace<C> {
     fn get_witness(&self) -> &[Vec<C::ScalarExt>] {
         self.W.get_witness()
     }
@@ -321,29 +350,30 @@ impl<C: CurveAffine> GetWitness<C::ScalarExt> for RelaxedPlonkTrace<C> {
 pub(crate) trait GetChallenges<F: PrimeField> {
     fn get_challenges(&self) -> &[F];
 }
-impl<C: CurveAffine> GetChallenges<C::ScalarExt> for PlonkInstance<C> {
+impl<C: BDCurveAffine> GetChallenges<C::ScalarExt> for PlonkInstance<C> {
     fn get_challenges(&self) -> &[C::ScalarExt] {
         &self.challenges
     }
 }
-impl<C: CurveAffine> GetChallenges<C::ScalarExt> for RelaxedPlonkInstance<C> {
+impl<C: BDCurveAffine> GetChallenges<C::ScalarExt> for RelaxedPlonkInstance<C> {
     fn get_challenges(&self) -> &[C::ScalarExt] {
         &self.challenges
     }
 }
 
-impl<C: CurveAffine> GetChallenges<C::ScalarExt> for PlonkTrace<C> {
+impl<C: BDCurveAffine> GetChallenges<C::Scalar> for PlonkTrace<C> {
     fn get_challenges(&self) -> &[C::ScalarExt] {
         self.u.get_challenges()
     }
 }
-impl<C: CurveAffine> GetChallenges<C::ScalarExt> for RelaxedPlonkTrace<C> {
+
+impl<C: BDCurveAffine> GetChallenges<C::Scalar> for RelaxedPlonkTrace<C> {
     fn get_challenges(&self) -> &[C::ScalarExt] {
         self.U.get_challenges()
     }
 }
 
-impl<C: CurveAffine> PlonkTrace<C> {
+impl<C: BDCurveAffine> PlonkTrace<C> {
     pub fn to_relax(&self, k: usize) -> RelaxedPlonkTrace<C> {
         RelaxedPlonkTrace {
             U: self.u.to_relax(),
@@ -352,21 +382,26 @@ impl<C: CurveAffine> PlonkTrace<C> {
     }
 }
 
-impl<C: CurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO> for PlonkInstance<C> {
+impl<C: BDCurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO> for PlonkInstance<C> {
     fn absorb_into(&self, ro: &mut RO) {
         ro.absorb_point_iter(self.W_commitments.iter())
             .absorb_field_iter(self.instance.iter().map(|inst| fe_to_fe(inst).unwrap()))
-            .absorb_field_iter(self.challenges.iter().map(|cha| fe_to_fe(cha).unwrap()));
+            .absorb_field_iter(self.challenges.iter().map(|cha| fe_to_fe(cha).unwrap()))
+            .absorb_point_iter(self.g1_elements.iter())
+            .absorb_g2_point_iter(self.g2_elements.iter());
     }
 }
 
-impl<C: CurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO> for RelaxedPlonkInstance<C> {
+impl<C: BDCurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO> for RelaxedPlonkInstance<C> {
     fn absorb_into(&self, ro: &mut RO) {
         ro.absorb_point_iter(self.W_commitments.iter())
             .absorb_point(&self.E_commitment)
             .absorb_field_iter(self.instance.iter().map(|inst| fe_to_fe(inst).unwrap()))
             .absorb_field_iter(self.challenges.iter().map(|cha| fe_to_fe(cha).unwrap()))
-            .absorb_field(fe_to_fe(&self.u).unwrap());
+            .absorb_field(fe_to_fe(&self.u).unwrap())
+            .absorb_point_iter(self.g1_elements.iter())
+            .absorb_g2_point_iter(self.g2_elements.iter())
+            .absorb_fp12_tuple(&self.gt_element);
     }
 }
 
@@ -406,7 +441,7 @@ impl<F: PrimeField> PlonkStructure<F> {
         W: &PlonkWitness<F>,
     ) -> Result<(), Error>
     where
-        C: CurveAffine<ScalarExt = F>,
+        C: BDCurveAffine<ScalarExt = F>,
     {
         U.sps_verify(ro_nark)?;
 
@@ -464,7 +499,7 @@ impl<F: PrimeField> PlonkStructure<F> {
         W: &RelaxedPlonkWitness<F>,
     ) -> Result<(), Error>
     where
-        C: CurveAffine<ScalarExt = F>,
+        C: BDCurveAffine<ScalarExt = F>,
     {
         let total_row = 1 << self.k;
 
@@ -531,7 +566,7 @@ impl<F: PrimeField> PlonkStructure<F> {
         W: &RelaxedPlonkWitness<F>,
     ) -> Result<(), Error>
     where
-        C: CurveAffine<ScalarExt = F>,
+        C: BDCurveAffine<ScalarExt = F>,
     {
         let Z = U
             .instance
@@ -590,9 +625,23 @@ impl<F: PrimeField> PlonkStructure<F> {
         self.custom_gates_lookup_compressed.grouped().len()
     }
 
-    pub fn dry_run_sps_protocol<C: CurveAffine<ScalarExt = F>>(&self) -> PlonkTrace<C> {
+    pub fn get_degree_for_folding_gt(&self) -> usize {
+        self.target_group_folding_degree
+    }
+
+    pub fn get_cross_term_count_gt(&self) -> usize {
+        self.target_group_cross_terms
+    }
+
+    pub fn dry_run_sps_protocol<C: BDCurveAffine<ScalarExt = F>>(&self) -> PlonkTrace<C> {
         PlonkTrace {
-            u: PlonkInstance::new(self.num_io, self.num_challenges, self.round_sizes.len()),
+            u: PlonkInstance::new(
+                self.num_io,
+                self.num_challenges,
+                self.round_sizes.len(),
+                self.num_g1_elems,
+                self.num_g2_elems,
+            ),
             w: PlonkWitness::new(&self.round_sizes),
         }
     }
@@ -601,7 +650,7 @@ impl<F: PrimeField> PlonkStructure<F> {
     /// depending on whether we have multiple gates, lookup arguments and whether
     /// we have vector lookup, we will call different sub-sps protocol
     #[instrument(name = "sps", skip_all)]
-    pub fn run_sps_protocol<C: CurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
+    pub fn run_sps_protocol<C: BDCurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
         &self,
         ck: &CommitmentKey<C>,
         instance: &[F],
@@ -622,7 +671,7 @@ impl<F: PrimeField> PlonkStructure<F> {
     /// run 0-round special soundness protocol
     /// w.r.t single custom gate + no lookup
     #[instrument(name = "0", skip_all)]
-    fn run_sps_protocol_0<C: CurveAffine<ScalarExt = F>>(
+    fn run_sps_protocol_0<C: BDCurveAffine<ScalarExt = F>>(
         &self,
         instance: &[F],
         advice: &[Vec<F>],
@@ -638,11 +687,20 @@ impl<F: PrimeField> PlonkStructure<F> {
                 err,
             })?;
 
+        // TODO(jbeal): Generate the correct group elements
+        let mut rng = thread_rng();
+
         Ok(PlonkTrace {
             u: PlonkInstance {
                 W_commitments: vec![C1],
                 instance: instance.to_vec(),
                 challenges: vec![],
+                g1_elements: (0..self.num_g1_elems)
+                    .map(|_| Point::<C>::random(&mut rng).to_curve().unwrap())
+                    .collect(),
+                g2_elements: (0..self.num_g2_elems)
+                    .map(|_| G2Point::<C, C::ScalarExt>::random(&mut rng))
+                    .collect(),
             },
             w: PlonkWitness { W: vec![W1] },
         })
@@ -654,7 +712,7 @@ impl<F: PrimeField> PlonkStructure<F> {
     /// [pi.instance] -> [C] -> ]r1[
     /// w.r.t multiple gates + no lookup
     #[instrument(name = "1", skip_all)]
-    fn run_sps_protocol_1<C: CurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
+    fn run_sps_protocol_1<C: BDCurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
         &self,
         instance: &[F],
         advice: &[Vec<F>],
@@ -684,10 +742,10 @@ impl<F: PrimeField> PlonkStructure<F> {
     /// run 2-round special soundness protocol to generate witnesses and challenges
     /// notations: "[C]" absorb C; "]r[" squeeze r;
     /// sequence of generating challenges:
-    /// [pi.instance] -> [C1] -> ]r1[ -> [C2] -> ]r2[
+    /// [pi.instance] -> [cm1] -> ]r1[ -> [cm2] -> ]r2[
     /// w.r.t has lookup but no vector lookup
     #[instrument(name = "2", skip_all)]
-    fn run_sps_protocol_2<C: CurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
+    fn run_sps_protocol_2<C: BDCurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
         &self,
         instance: &[F],
         advice: &[Vec<F>],
@@ -713,7 +771,7 @@ impl<F: PrimeField> PlonkStructure<F> {
         ]
         .concat();
 
-        let C1 = {
+        let cm1 = {
             let _s = info_span!("lookup+witness_commit").entered();
             ck.commit(&W1).map_err(|err| SpsError::WrongCommitmentSize {
                 annotation: "W1",
@@ -723,7 +781,7 @@ impl<F: PrimeField> PlonkStructure<F> {
 
         let r1 = ro_nark
             .absorb_field_iter(instance.iter().map(|inst| fe_to_fe(inst).unwrap()))
-            .absorb_point(&C1)
+            .absorb_point(&cm1)
             .squeeze::<C>(NUM_CHALLENGE_BITS);
 
         // round 2
@@ -734,31 +792,40 @@ impl<F: PrimeField> PlonkStructure<F> {
             k_power_of_2,
         );
 
-        let C2 = {
+        let cm2 = {
             let _s = info_span!("lookup_commit").entered();
             ck.commit(&W2).map_err(|err| SpsError::WrongCommitmentSize {
                 annotation: "W2",
                 err,
             })
         }?;
-        let r2 = ro_nark.absorb_point(&C2).squeeze::<C>(NUM_CHALLENGE_BITS);
+        let r2 = ro_nark.absorb_point(&cm2).squeeze::<C>(NUM_CHALLENGE_BITS);
+
+        // TODO(jbeal): Generate the correct group elements
+        let mut rng = thread_rng();
 
         Ok(PlonkTrace {
             u: PlonkInstance {
-                W_commitments: vec![C1, C2],
+                W_commitments: vec![cm1, cm2],
                 instance: instance.to_vec(),
                 challenges: vec![r1, r2],
+                g1_elements: (0..self.num_g1_elems)
+                    .map(|_| Point::<C>::random(&mut rng).to_curve().unwrap())
+                    .collect(),
+                g2_elements: (0..self.num_g2_elems)
+                    .map(|_| G2Point::<C, C::ScalarExt>::random(&mut rng))
+                    .collect(),
             },
             w: PlonkWitness { W: vec![W1, W2] },
         })
     }
 
     /// run 3-round special soundness protocol to generate witnesses and challenges
-    /// notations: "[C]" absorb C; "]r[" squeeze r;
+    /// notations: "[cm]" absorb cm; "]r[" squeeze r;
     /// sequence of generating challenges:
-    /// [pi.instance] -> [C1] -> ]r1[ -> [C2] -> ]r2[ -> [C3] -> ]r3[
+    /// [pi.instance] -> [cm1] -> ]r1[ -> [cm2] -> ]r2[ -> [cm3] -> ]r3[
     #[instrument(name = "3", skip_all)]
-    fn run_sps_protocol_3<C: CurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
+    fn run_sps_protocol_3<C: BDCurveAffine<ScalarExt = F>, RO: ROTrait<C::Base>>(
         &self,
         instance: &[F],
         advice: &[Vec<F>],
@@ -771,14 +838,14 @@ impl<F: PrimeField> PlonkStructure<F> {
 
         // round 1
         let W1 = concatenate_with_padding(advice, k_power_of_2);
-        let C1 = {
+        let cm1 = {
             let _s = info_span!("witness_commit").entered();
             ck.commit(&W1).map_err(|err| SpsError::WrongCommitmentSize {
                 annotation: "W1",
                 err,
             })
         }?;
-        let r1 = ro_nark.absorb_point(&C1).squeeze::<C>(NUM_CHALLENGE_BITS);
+        let r1 = ro_nark.absorb_point(&cm1).squeeze::<C>(NUM_CHALLENGE_BITS);
 
         // round 2
         let lookup_coeff = self
@@ -792,14 +859,14 @@ impl<F: PrimeField> PlonkStructure<F> {
             &concat_vec!(&lookup_coeff.ls, &lookup_coeff.ts, &lookup_coeff.ms),
             k_power_of_2,
         );
-        let C2 = {
+        let cm2 = {
             let _s = info_span!("lookup_commit").entered();
             ck.commit(&W2).map_err(|err| SpsError::WrongCommitmentSize {
                 annotation: "W2",
                 err,
             })
         }?;
-        let r2 = ro_nark.absorb_point(&C2).squeeze::<C>(NUM_CHALLENGE_BITS);
+        let r2 = ro_nark.absorb_point(&cm2).squeeze::<C>(NUM_CHALLENGE_BITS);
 
         // round 3
         let lookup_coeff = lookup_coeff.evaluate_coefficient_2(r2);
@@ -809,20 +876,29 @@ impl<F: PrimeField> PlonkStructure<F> {
             k_power_of_2,
         );
 
-        let C3 = {
+        let cm3 = {
             let _s = info_span!("lookup_commit").entered();
             ck.commit(&W3).map_err(|err| SpsError::WrongCommitmentSize {
                 annotation: "W3",
                 err,
             })
         }?;
-        let r3 = ro_nark.absorb_point(&C3).squeeze::<C>(NUM_CHALLENGE_BITS);
+        let r3 = ro_nark.absorb_point(&cm3).squeeze::<C>(NUM_CHALLENGE_BITS);
+
+        // TODO(jbeal): Generate the correct group elements
+        let mut rng = thread_rng();
 
         Ok(PlonkTrace {
             u: PlonkInstance {
-                W_commitments: vec![C1, C2, C3],
+                W_commitments: vec![cm1, cm2, cm3],
                 instance: instance.to_vec(),
                 challenges: vec![r1, r2, r3],
+                g1_elements: (0..self.num_g1_elems)
+                    .map(|_| Point::<C>::random(&mut rng).to_curve().unwrap())
+                    .collect(),
+                g2_elements: (0..self.num_g2_elems)
+                    .map(|_| G2Point::<C, C::ScalarExt>::random(&mut rng))
+                    .collect(),
             },
             w: PlonkWitness {
                 W: vec![W1, W2, W3],
@@ -831,12 +907,20 @@ impl<F: PrimeField> PlonkStructure<F> {
     }
 }
 
-impl<C: CurveAffine> PlonkInstance<C> {
-    pub fn new(num_io: usize, num_challenges: usize, num_witness: usize) -> Self {
+impl<C: BDCurveAffine> PlonkInstance<C> {
+    pub fn new(
+        num_io: usize,
+        num_challenges: usize,
+        num_witness: usize,
+        num_g1_elems: usize,
+        num_g2_elems: usize,
+    ) -> Self {
         Self {
             W_commitments: vec![CommitmentKey::<C>::default_value(); num_witness],
             instance: vec![C::ScalarExt::ZERO; num_io],
             challenges: vec![C::ScalarExt::ZERO; num_challenges],
+            g1_elements: vec![CommitmentKey::<C>::default_value(); num_g1_elems],
+            g2_elements: vec![G2Point::<C, C::ScalarExt>::default(); num_g2_elems],
         }
     }
 
@@ -847,18 +931,32 @@ impl<C: CurveAffine> PlonkInstance<C> {
             instance: self.instance.clone(),
             challenges: self.challenges.clone(),
             u: C::ScalarExt::ONE,
+            g1_elements: self.g1_elements.clone(),
+            g2_elements: self.g2_elements.clone(),
+            gt_element: Tuple12::<C>::one(),
         }
     }
 }
 
-impl<C: CurveAffine> RelaxedPlonkInstance<C> {
-    pub fn new(num_io: usize, num_challenges: usize, num_witness: usize) -> Self {
+impl<C: BDCurveAffine> RelaxedPlonkInstance<C> {
+    pub fn new(
+        num_io: usize,
+        num_challenges: usize,
+        num_witness: usize,
+        num_g1_elems: usize,
+        num_g2_elems: usize,
+    ) -> Self {
+        println!("[RelaxedPlonkInstance] num_g1_elems {}", num_g1_elems);
+        println!("[RelaxedPlonkInstance] num_g2_elems {}", num_g2_elems);
         Self {
             W_commitments: vec![CommitmentKey::<C>::default_value(); num_witness],
             E_commitment: CommitmentKey::<C>::default_value(),
             instance: vec![C::ScalarExt::ZERO; num_io],
             challenges: vec![C::ScalarExt::ZERO; num_challenges],
             u: C::ScalarExt::ZERO,
+            g1_elements: vec![CommitmentKey::<C>::default_value(); num_g1_elems],
+            g2_elements: vec![G2Point::<C, C::ScalarExt>::default(); num_g2_elems],
+            gt_element: Tuple12::<C>::one(),
         }
     }
 
@@ -878,7 +976,13 @@ impl<C: CurveAffine> RelaxedPlonkInstance<C> {
     /// The folded `RelaxedPlonkInstance` after combining the instances and commitments.
     /// for detail of how fold works, please refer to: [nifs](https://hackmd.io/d7syox5tTeaxkepc9nLvHw?view#31-NIFS)
     #[instrument(name = "fold_plonk_instance", skip_all)]
-    pub fn fold(&self, U2: &PlonkInstance<C>, cross_term_commits: &[C], r: &C::ScalarExt) -> Self {
+    pub fn fold(
+        &self,
+        U2: &PlonkInstance<C>,
+        cross_term_g1_commits: &[C],
+        cross_term_gt_commits: &[Tuple12<C>],
+        r: &C::ScalarExt,
+    ) -> Self {
         let W_commitments = self
             .W_commitments
             .iter()
@@ -893,6 +997,38 @@ impl<C: CurveAffine> RelaxedPlonkInstance<C> {
                 res.into()
             })
             .collect::<Vec<C>>();
+
+        let g1_elements = self
+            .g1_elements
+            .iter()
+            .zip(U2.g1_elements.clone())
+            .enumerate()
+            .map(|(W_index, (g1_1, g1_2))| {
+                let rg1 = best_multiexp(&[*r], &[g1_2]).into();
+                let res = *g1_1 + rg1;
+                debug!(
+                    "g1_1 = {g1_1:?}; g1_2 = {g1_2:?}; rg1[{W_index}] = {rg1:?}; g1_1 + g1_2 * r = {res:?}"
+                );
+                res.into()
+            })
+            .collect::<Vec<C>>();
+        println!("[RelaxedPlonkInstance] fold g1 elems {}", g1_elements.len());
+
+        let g2_elements = self
+            .g2_elements
+            .iter()
+            .zip(U2.g2_elements.clone())
+            .enumerate()
+            .map(|(W_index, (g2_1, g2_2))| {
+                let rg2 = g2_2.scalar_mul(r);
+                let res = g2_1.add(&rg2);
+                debug!(
+                    "g2_1 = {g2_1:?}; g2_2 = {g2_2:?}; rg2[{W_index}] = {rg2:?}; g2_1 + g2_2 * r = {res:?}"
+                );
+                res
+            })
+            .collect::<Vec<G2Point<C, C::ScalarExt>>>();
+        println!("[RelaxedPlonkInstance] fold g2 elems {}", g2_elements.len());
 
         let instance = self
             .instance
@@ -910,18 +1046,37 @@ impl<C: CurveAffine> RelaxedPlonkInstance<C> {
 
         let u = self.u + *r;
 
-        let comm_E = cross_term_commits
+        let E_commitment = cross_term_g1_commits
             .iter()
             .zip(iter::successors(Some(*r), |el| Some(*el * *r))) // r^1, r^2, ...
             .map(|(tk, power_of_r)| best_multiexp(&[power_of_r], &[*tk]).into())
             .fold(self.E_commitment, |acc, x| (acc + x).into());
+        println!(
+            "[RelaxedPlonkInstance] fold cross_term_g1_commits {}",
+            cross_term_g1_commits.len()
+        );
+
+        let gt_element = cross_term_gt_commits
+            .iter()
+            .zip(iter::successors(Some(*r), |el| Some(*el * *r))) // r^1, r^2, ...
+            .fold(self.gt_element.clone(), |acc, (gt_commit, power_of_r)| {
+                let res = gt_commit.scalar_mul::<C::ScalarExt, 9>(&power_of_r);
+                acc.mul::<9>(&res)
+            });
+        println!(
+            "[RelaxedPlonkInstance] fold cross_term_gt_commits {}",
+            cross_term_gt_commits.len()
+        );
 
         RelaxedPlonkInstance {
             W_commitments,
-            E_commitment: comm_E,
+            E_commitment,
             instance,
             u,
             challenges,
+            g1_elements,
+            g2_elements,
+            gt_element,
         }
     }
 }
@@ -1138,13 +1293,17 @@ pub(crate) mod test_eval_witness {
             12,
             poseidon_circuit::TestPoseidonCircuit::default(),
             vec![],
+            2,
+            1,
+            2,
+            1,
         );
 
         let S = runner.try_collect_plonk_structure().unwrap();
 
         let witness = runner.try_collect_witness().unwrap();
 
-        let PlonkTrace { u, w } = S
+        let PlonkTrace { u, w }: PlonkTrace<Curve> = S
             .run_sps_protocol(
                 &CommitmentKey::<Curve>::setup(15, b"k"),
                 &[],

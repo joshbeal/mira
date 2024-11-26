@@ -9,9 +9,21 @@ re-trivial =  [ "run", "--example", "trivial", "--release", "--", "--json"]
 
 # Merkle Example
 
-## Run merkle-tree-update-circuit with sirius
-re-merkle =   [ "run", "--example", "merkle", "--release", "--", "--json-logs"]
+## Run merkle-tree-update-circuit
+re-merkle =       [ "run", "--example", "merkle", "--release", "--", "--json-logs"]
+## Run merkle-tree-update-circuit with dev options
+re-merkle-dev =   [ "run", "--example", "merkle", "--release", "--", "--json-logs", "--file-logs", "--repeat-count", "10"]
 ## Run merkle-tree-update-circuit with halo2-kzg
 re-kzg-merkle =   [ "re-merkle", "halo2-kzg"]
 ## Run merkle-tree-update-circuit with halo2-ipa
 re-ipa-merkle =   [ "re-merkle", "halo2-ipa"]
+
+# Groth16 example
+re-groth16 =       [ "run", "--example", "groth16", "--release", "--", "--json-logs"]
+re-groth16-dev =   [ "run", "--example", "groth16", "--release", "--", "--json-logs", "--file-logs", "--repeat-count", "10", "--batch-size", "1"]
+re-groth16-dhat =  [ "run", "--example", "groth16", "--release", "--features", "dhat-heap", "--"]
+
+# ZKML example
+re-zkml =       [ "run", "--example", "zkml", "--release", "--", "--json-logs"]
+re-zkml-dev =   [ "run", "--example", "zkml", "--release", "--", "--json-logs", "--file-logs", "--repeat-count", "10", "--matrix-dim", "128"]
+re-zkml-dhat =  [ "run", "--example", "zkml", "--release", "--features", "dhat-heap", "--"]

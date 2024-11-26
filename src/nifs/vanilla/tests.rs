@@ -4,7 +4,7 @@ use tracing_test::traced_test;
 
 use super::*;
 use crate::{
-    ff::{PrimeField, PrimeFieldBits},
+    ff::PrimeField,
     halo2curves::{
         bn256::{Fr, G1Affine},
         group::ff::FromUniformBytes,
@@ -14,11 +14,12 @@ use crate::{
         PlonkStructure, PlonkTrace, RelaxedPlonkInstance, RelaxedPlonkTrace, RelaxedPlonkWitness,
     },
     table::CircuitRunner,
+    traits::BDCurveAffine,
     util::create_ro,
 };
 
 #[derive(thiserror::Error, Debug)]
-enum Error<C: CurveAffine> {
+enum Error<C: BDCurveAffine> {
     #[error(transparent)]
     Nifs(#[from] nifs::vanilla::Error),
     #[error(transparent)]
@@ -34,7 +35,7 @@ enum Error<C: CurveAffine> {
     },
 }
 
-impl<C: CurveAffine> Error<C> {
+impl<C: BDCurveAffine> Error<C> {
     fn check_equality(
         from_verify: &RelaxedPlonkInstance<C>,
         from_prove: &RelaxedPlonkInstance<C>,
@@ -66,9 +67,9 @@ fn prepare_trace<C, F1, F2, CT>(
     Error<C>,
 >
 where
-    C: CurveAffine<ScalarExt = F1, Base = F2>,
+    C: BDCurveAffine<ScalarExt = F1, Base = F2>,
     F1: PrimeField,
-    F2: PrimeFieldBits + FromUniformBytes<64>,
+    F2: FromUniformBytes<64>,
     CT: Circuit<F1>,
 {
     const T: usize = 3;
@@ -76,13 +77,13 @@ where
     const R_F: usize = 4;
     const R_P: usize = 3;
 
-    let td1 = CircuitRunner::new(K, circuit1, public_inputs1.clone());
+    let td1 = CircuitRunner::new(K, circuit1, public_inputs1.clone(), 2, 1, 2, 1);
     let ck = setup_smallest_commitment_key(K, &td1.cs, b"prepare_trace");
 
     let S = td1.try_collect_plonk_structure()?;
     let W1 = td1.try_collect_witness()?;
 
-    let td2 = CircuitRunner::new(K, circuit2, public_inputs2.clone());
+    let td2 = CircuitRunner::new(K, circuit2, public_inputs2.clone(), 2, 1, 2, 1);
     let W2 = td2.try_collect_witness()?;
 
     let mut ro_nark_prepare = create_ro::<C::Base, T, RATE, R_F, R_P>();
@@ -141,16 +142,22 @@ fn fold_instances<C, F1, F2>(
     pp_digest: C,
 ) -> Result<(), Error<C>>
 where
-    C: CurveAffine<ScalarExt = F1, Base = F2>,
+    C: BDCurveAffine<ScalarExt = F1, Base = F2>,
     F1: PrimeField,
-    F2: PrimeFieldBits + FromUniformBytes<64>,
+    F2: FromUniformBytes<64>,
 {
     const T: usize = 3;
     const RATE: usize = 2;
     const R_F: usize = 4;
     const R_P: usize = 3;
 
-    let mut f_U = RelaxedPlonkInstance::new(S.num_io, S.num_challenges, S.round_sizes.len());
+    let mut f_U = RelaxedPlonkInstance::new(
+        S.num_io,
+        S.num_challenges,
+        S.round_sizes.len(),
+        S.num_g1_elems,
+        S.num_g2_elems,
+    );
     let mut f_W = RelaxedPlonkWitness::new(S.k, &S.round_sizes);
 
     let mut ro_nark_verifier = create_ro::<C::Base, T, RATE, R_F, R_P>();

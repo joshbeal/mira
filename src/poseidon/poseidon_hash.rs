@@ -6,8 +6,10 @@ use tracing::*;
 
 use super::Spec;
 use crate::{
+    gadgets::{ecc2::G2Point, fp12::Tuple12},
     halo2curves::group::ff::{FromUniformBytes, PrimeField},
     poseidon::{ROConstantsTrait, ROTrait},
+    traits::BDCurveAffine,
     util::{bits_to_fe_le, fe_to_bits_le},
 };
 
@@ -124,7 +126,7 @@ where
         self
     }
 
-    fn absorb_point<C: CurveAffine<Base = F>>(&mut self, point: &C) -> &mut Self {
+    fn absorb_point<C: BDCurveAffine<Base = F>>(&mut self, point: &C) -> &mut Self {
         let encoded = point.coordinates().map(|coordinates| {
             [coordinates.x(), coordinates.y()]
                 .into_iter()
@@ -137,6 +139,23 @@ where
             self.update(&[C::Base::ZERO, C::Base::ZERO]) // C is infinity
         }
 
+        self
+    }
+
+    fn absorb_g2_point<C: BDCurveAffine<Base = F>>(
+        &mut self,
+        point: &G2Point<C, C::ScalarExt>,
+    ) -> &mut Self {
+        if point.is_inf {
+            self.update(&[F::ZERO, F::ZERO, F::ZERO, F::ZERO])
+        } else {
+            self.update(&[point.x.c0, point.x.c1, point.y.c0, point.y.c1])
+        }
+        self
+    }
+
+    fn absorb_fp12_tuple<C: BDCurveAffine<Base = F>>(&mut self, tuple: &Tuple12<C>) -> &mut Self {
+        self.update(&tuple.elements);
         self
     }
 

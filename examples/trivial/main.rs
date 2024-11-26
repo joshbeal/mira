@@ -5,7 +5,7 @@ use std::{array, env, io, num::NonZeroUsize, path::Path};
 use bn256::G1 as C1;
 use grumpkin::G1 as C2;
 use metadata::LevelFilter;
-use sirius::{
+use mira::{
     commitment::CommitmentKey,
     group::{prime::PrimeCurve, Group},
     halo2curves::{bn256, grumpkin, CurveAffine, CurveExt},
@@ -95,12 +95,20 @@ fn main() {
     >::new(
         CircuitPublicParamsInput::new(
             CIRCUIT_TABLE_SIZE1 as u32,
+            0,
+            0,
+            0,
+            0,
             &primary_commitment_key,
             primary_spec,
             &sc1,
         ),
         CircuitPublicParamsInput::new(
             CIRCUIT_TABLE_SIZE2 as u32,
+            0,
+            0,
+            0,
+            0,
             &secondary_commitment_key,
             secondary_spec,
             &sc2,

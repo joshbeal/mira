@@ -6,7 +6,7 @@ use bn256::G1 as C1;
 use criterion::{black_box, criterion_group, Criterion};
 use grumpkin::G1 as C2;
 use metadata::LevelFilter;
-use sirius::{
+use mira::{
     commitment::CommitmentKey,
     ff::Field,
     group::{prime::PrimeCurve, Group},
@@ -83,12 +83,20 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     >::new(
         CircuitPublicParamsInput::new(
             CIRCUIT_TABLE_SIZE1 as u32,
+            0,
+            0,
+            0,
+            0,
             &primary_commitment_key,
             primary_spec.clone(),
             &sc1,
         ),
         CircuitPublicParamsInput::new(
             CIRCUIT_TABLE_SIZE2 as u32,
+            0,
+            0,
+            0,
+            0,
             &secondary_commitment_key,
             secondary_spec.clone(),
             &sc2,

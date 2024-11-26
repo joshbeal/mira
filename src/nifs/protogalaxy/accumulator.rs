@@ -2,14 +2,14 @@ use std::iter;
 
 use crate::{
     ff::Field,
-    halo2curves::CurveAffine,
     plonk::{RelaxedPlonkTrace, RelaxedPlonkTraceArgs},
     poseidon::{AbsorbInRO, ROTrait},
+    traits::BDCurveAffine,
     util,
 };
 
 /// TODO#266 Docs
-pub struct Accumulator<C: CurveAffine> {
+pub struct Accumulator<C: BDCurveAffine> {
     /// TODO#266 Docs
     pub(super) betas: Box<[C::ScalarExt]>,
     /// TODO#266 Docs
@@ -18,7 +18,7 @@ pub struct Accumulator<C: CurveAffine> {
     pub(super) e: C::ScalarExt,
 }
 
-impl<C: CurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO> for Accumulator<C> {
+impl<C: BDCurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO> for Accumulator<C> {
     fn absorb_into(&self, ro: &mut RO) {
         ro.absorb(&self.trace.U).absorb_field_iter(
             self.betas
@@ -31,7 +31,7 @@ impl<C: CurveAffine, RO: ROTrait<C::Base>> AbsorbInRO<C::Base, RO> for Accumulat
 
 pub type AccumulatorArgs = RelaxedPlonkTraceArgs;
 
-impl<C: CurveAffine> Accumulator<C> {
+impl<C: BDCurveAffine> Accumulator<C> {
     pub fn new(args: AccumulatorArgs, count_of_evaluation: usize) -> Self {
         Self {
             betas: vec![C::ScalarExt::ZERO; count_of_evaluation].into_boxed_slice(),

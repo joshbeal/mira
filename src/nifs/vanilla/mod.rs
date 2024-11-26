@@ -9,6 +9,7 @@ use crate::{
     concat_vec,
     constants::NUM_CHALLENGE_BITS,
     ff::Field,
+    gadgets::fp12::Tuple12,
     plonk::{
         eval::{GetDataForEval, PlonkEvalDomain},
         PlonkInstance, PlonkStructure, PlonkTrace, PlonkWitness, RelaxedPlonkInstance,
@@ -17,6 +18,7 @@ use crate::{
     polynomial::graph_evaluator::GraphEvaluator,
     poseidon::ROTrait,
     sps::SpecialSoundnessVerifier,
+    traits::BDCurveAffine,
 };
 
 /// Represent intermediate polynomial terms that arise when folding
@@ -29,7 +31,7 @@ use crate::{
 pub type CrossTerms<C> = Vec<Box<[<C as CurveAffine>::ScalarExt]>>;
 
 /// Cryptographic commitments to the [`CrossTerms`].
-pub type CrossTermCommits<C> = Vec<C>;
+pub type CrossTermCommits<C> = (Vec<C>, Vec<Tuple12<C>>);
 
 /// VanillaFS: Vanilla version of Non Interactive Folding Scheme
 ///
@@ -42,17 +44,17 @@ pub type CrossTermCommits<C> = Vec<C>;
 /// Please refer to: [notes](https://hackmd.io/@chaosma/BJvWmnw_h#31-NIFS)
 // TODO Replace links to either the documentation right here, or the official Snarkify resource
 #[derive(Clone, Debug)]
-pub struct VanillaFS<C: CurveAffine> {
+pub struct VanillaFS<C: BDCurveAffine> {
     _marker: PhantomData<C>,
 }
 
-pub struct VanillaFSProverParam<C: CurveAffine> {
+pub struct VanillaFSProverParam<C: BDCurveAffine> {
     pub(crate) S: PlonkStructure<C::ScalarExt>,
     /// digest of public parameter of IVC circuit
     pp_digest: C,
 }
 
-impl<C: CurveAffine> VanillaFS<C> {
+impl<C: BDCurveAffine> VanillaFS<C> {
     /// Commits to the cross terms between two Plonk instance-witness pairs.
     ///
     /// This method calculates the cross terms and their commitments, which
@@ -119,10 +121,19 @@ impl<C: CurveAffine> VanillaFS<C> {
         evaluation_span.exit();
 
         let commit_span = info_span!("commit").entered();
-        let cross_term_commits: Vec<C> = cross_terms
+        let cross_term_g1_commits: Vec<C> = cross_terms
             .iter()
             .map(|v| ck.commit(v))
             .collect::<Result<Vec<_>, _>>()?;
+        println!("cross_term_g1_commits {}", cross_term_g1_commits.len());
+
+        // TODO(jbeal): Generate the correct target group cross terms
+        let cross_term_gt_commits: Vec<Tuple12<C>> = (0..S.target_group_cross_terms)
+            .map(|_| Tuple12::random_vartime::<C::ScalarExt, 9>())
+            .collect();
+        println!("cross_term_gt_commits {}", cross_term_gt_commits.len());
+        let cross_term_commits = (cross_term_g1_commits, cross_term_gt_commits);
+
         commit_span.exit();
 
         Ok((cross_terms, cross_term_commits))
@@ -135,13 +146,15 @@ impl<C: CurveAffine> VanillaFS<C> {
         ro_acc: &mut impl ROTrait<C::Base>,
         U1: &RelaxedPlonkInstance<C>,
         U2: &PlonkInstance<C>,
-        cross_term_commits: &[C],
+        cross_term_g1_commits: &[C],
+        cross_term_gt_commits: &[Tuple12<C>],
     ) -> Result<<C as CurveAffine>::ScalarExt, Error> {
         Ok(ro_acc
             .absorb_point(pp_digest)
             .absorb(U1)
             .absorb(U2)
-            .absorb_point_iter(cross_term_commits.iter())
+            .absorb_point_iter(cross_term_g1_commits.iter())
+            .absorb_fp12_tuple_iter(cross_term_gt_commits.iter())
             .squeeze::<C>(NUM_CHALLENGE_BITS))
     }
 }
@@ -160,7 +173,7 @@ pub enum Error {
     Commitment(#[from] commitment::Error),
 }
 
-impl<C: CurveAffine> FoldingScheme<C> for VanillaFS<C> {
+impl<C: BDCurveAffine> FoldingScheme<C> for VanillaFS<C> {
     type Error = Error;
     type ProverParam = VanillaFSProverParam<C>;
     type VerifierParam = C;
@@ -220,10 +233,18 @@ impl<C: CurveAffine> FoldingScheme<C> for VanillaFS<C> {
 
         let (cross_terms, cross_term_commits) =
             Self::commit_cross_terms(ck, &pp.S, U1, W1, U2, W2)?;
+        let (cross_term_g1_commits, cross_term_gt_commits) = &cross_term_commits;
 
-        let r = VanillaFS::generate_challenge(&pp.pp_digest, ro_acc, U1, U2, &cross_term_commits)?;
+        let r = VanillaFS::generate_challenge(
+            &pp.pp_digest,
+            ro_acc,
+            U1,
+            U2,
+            cross_term_g1_commits,
+            cross_term_gt_commits,
+        )?;
 
-        let U = U1.fold(U2, &cross_term_commits, &r);
+        let U = U1.fold(U2, cross_term_g1_commits, cross_term_gt_commits, &r);
         let W = W1.fold(W2, &cross_terms, &r);
 
         Ok((RelaxedPlonkTrace { U, W }, cross_term_commits))
@@ -258,9 +279,16 @@ impl<C: CurveAffine> FoldingScheme<C> for VanillaFS<C> {
 
         U2.sps_verify(ro_nark)?;
 
-        let r = VanillaFS::generate_challenge(vp, ro_acc, U1, U2, cross_term_commits)?;
+        let r = VanillaFS::generate_challenge(
+            vp,
+            ro_acc,
+            U1,
+            U2,
+            &cross_term_commits.0,
+            &cross_term_commits.1,
+        )?;
 
-        Ok(U1.fold(U2, cross_term_commits, &r))
+        Ok(U1.fold(U2, &cross_term_commits.0, &cross_term_commits.1, &r))
     }
 }
 

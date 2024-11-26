@@ -43,6 +43,20 @@ impl<F: PrimeFieldBits + FromUniformBytes<64>, const T: usize, const RATE: usize
         self.update(&point)
     }
 
+    fn absorb_g2_point(&mut self, point: [WrapValue<F>; 4]) -> &mut Self {
+        for element in point.into_iter() {
+            self.absorb_base(element);
+        }
+        self
+    }
+
+    fn absorb_fp12_tuple(&mut self, tuple: [WrapValue<F>; 12]) -> &mut Self {
+        for element in tuple.into_iter() {
+            self.absorb_base(element);
+        }
+        self
+    }
+
     fn inspect(&mut self, scan: impl FnOnce(&[F])) -> &mut Self
     where
         F: Sized,

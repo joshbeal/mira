@@ -55,6 +55,8 @@ use crate::{
     ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits},
     gadgets::{
         ecc::{AssignedPoint, EccChip},
+        ecc2::{AssignedG2Point, G2EccChip, G2Point},
+        fp12::{AssignedTuple12, Fp12Chip, Tuple12},
         nonnative::bn::{
             big_uint::{self, BigUint},
             big_uint_mul_mod_chip::{self, BigUintMulModChip, OverflowingBigUint},
@@ -67,12 +69,13 @@ use crate::{
     },
     plonk::{PlonkInstance, RelaxedPlonkInstance},
     poseidon::ROCircuitTrait,
+    traits::BDCurveAffine,
     util::{self, CellsValuesView},
 };
 
-pub(crate) struct FoldRelaxedPlonkInstanceChip<const T: usize, C: CurveAffine>
+pub(crate) struct FoldRelaxedPlonkInstanceChip<const T: usize, C: BDCurveAffine>
 where
-    C::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C::Base: FromUniformBytes<64>,
 {
     relaxed: RelaxedPlonkInstance<C>,
     config: MainGateConfig<T>,
@@ -84,7 +87,7 @@ where
 
 /// Holds the assigned values and points resulting from the folding process.
 #[derive(Debug, Clone)]
-pub(crate) struct AssignedRelaxedPlonkInstance<C: CurveAffine> {
+pub(crate) struct AssignedRelaxedPlonkInstance<C: BDCurveAffine> {
     /// Assigned point representing the folded accumulator W.
     /// Derived from [`FoldRelaxedPlonkInstanceChip::W`]
     pub folded_W: Vec<AssignedPoint<C>>,
@@ -108,21 +111,32 @@ pub(crate) struct AssignedRelaxedPlonkInstance<C: CurveAffine> {
     /// Vector of assigned values for each limb of the folded big number X1.
     /// Derived from [`FoldRelaxedPlonkInstanceChip::X1`]
     pub folded_X1: Vec<AssignedValue<C::Base>>,
+
+    /// Vector of assigned points representing the folded accumulator g1 elements.
+    /// Derived from [`FoldRelaxedPlonkInstanceChip::g1_elements`]
+    pub folded_g1_elements: Vec<AssignedPoint<C>>,
+
+    /// Vector of assigned tuples representing the folded accumulator g2 elements.
+    /// Derived from [`FoldRelaxedPlonkInstanceChip::g2_elements`]
+    pub folded_g2_elements: Vec<AssignedG2Point<C>>,
+
+    /// Assigned tuple representing the folded accumulator gt element.
+    /// Derived from [`FoldRelaxedPlonkInstanceChip::gt_element`]
+    pub folded_gt_element: AssignedTuple12<C>,
 }
 
-impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
+impl<C: BDCurveAffine> AssignedRelaxedPlonkInstance<C> {
     pub fn conditional_select<const T: usize>(
         region: &mut RegionCtx<C::Base>,
         config: &MainGateConfig<T>,
         lhs: &Self,
         rhs: &Self,
         condition: AssignedValue<C::Base>,
-    ) -> Result<Self, Error>
-    where
-        C::Base: PrimeFieldBits,
-    {
+    ) -> Result<Self, Error> {
         let ecc = EccChip::<C, C::Base, T>::new(config.clone());
         let gate = MainGate::<C::Base, T>::new(config.clone());
+        let g2ecc = G2EccChip::<C, C::Base, T>::new(config.clone());
+        let fp12 = Fp12Chip::<C, C::Base, T, 9>::new(config.clone());
 
         let Self {
             folded_W: lhs_folded_W,
@@ -131,6 +145,9 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
             folded_challenges: lhs_folded_challenges,
             folded_X0: lhs_folded_X0,
             folded_X1: lhs_folded_X1,
+            folded_g1_elements: lhs_folded_g1_elements,
+            folded_g2_elements: lhs_folded_g2_elements,
+            folded_gt_element: lhs_folded_gt_element,
         } = lhs;
 
         let Self {
@@ -140,6 +157,9 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
             folded_challenges: rhs_folded_challenges,
             folded_X0: rhs_folded_X0,
             folded_X1: rhs_folded_X1,
+            folded_g1_elements: rhs_folded_g1_elements,
+            folded_g2_elements: rhs_folded_g2_elements,
+            folded_gt_element: rhs_folded_gt_element,
         } = rhs;
 
         let folded_W = lhs_folded_W
@@ -176,6 +196,27 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
             .map(|(lhs, rhs)| gate.conditional_select(region, lhs, rhs, &condition))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let folded_g1_elements = lhs_folded_g1_elements
+            .iter()
+            .zip_eq(rhs_folded_g1_elements.iter())
+            .map(|(lhs_g1i, rhs_g1i)| ecc.conditional_select(region, lhs_g1i, rhs_g1i, &condition))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let folded_g2_elements = lhs_folded_g2_elements
+            .iter()
+            .zip_eq(rhs_folded_g2_elements.iter())
+            .map(|(lhs_g2i, rhs_g2i)| {
+                g2ecc.conditional_select_g2(region, lhs_g2i, rhs_g2i, &condition)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let folded_gt_element = fp12.conditional_select(
+            region,
+            lhs_folded_gt_element,
+            rhs_folded_gt_element,
+            &condition,
+        )?;
+
         Ok(Self {
             folded_W,
             folded_E,
@@ -183,6 +224,9 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
             folded_challenges,
             folded_X0,
             folded_X1,
+            folded_g1_elements,
+            folded_g2_elements,
+            folded_gt_element,
         })
     }
 
@@ -197,6 +241,9 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
             folded_challenges,
             folded_X0,
             folded_X1,
+            folded_g1_elements,
+            folded_g2_elements,
+            folded_gt_element,
         } = self;
 
         folded_W
@@ -207,9 +254,21 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
             .chain(folded_X1.iter().map(Into::into))
             .chain(folded_challenges.iter().flatten().map(Into::into))
             .chain(iter::once(WrapValue::from(folded_u)))
+            .chain(
+                folded_g1_elements
+                    .iter()
+                    .flat_map(|g1i| WrapValue::from_assigned_point(g1i)),
+            )
+            .chain(
+                folded_g2_elements
+                    .iter()
+                    .flat_map(|g2i| WrapValue::from_assigned_g2_point(g2i)),
+            )
+            .chain(WrapValue::from_assigned_fp12(folded_gt_element))
     }
 }
-impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
+
+impl<C: BDCurveAffine> AssignedRelaxedPlonkInstance<C> {
     fn to_relaxed_plonk_instance(
         &self,
         limb_width: NonZeroUsize,
@@ -222,6 +281,9 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
             folded_challenges,
             folded_X0,
             folded_X1,
+            folded_g1_elements,
+            folded_g2_elements,
+            folded_gt_element,
         } = self;
 
         macro_rules! unwrap_result_option {
@@ -289,13 +351,22 @@ impl<C: CurveAffine> AssignedRelaxedPlonkInstance<C> {
                 .iter()
                 .flat_map(|c| to_diff_bn(c))
                 .collect::<Result<Vec<_>, _>>()?,
+            g1_elements: unwrap_result_option!(folded_g1_elements
+                .iter()
+                .map(AssignedPoint::to_curve)
+                .collect()),
+            g2_elements: unwrap_result_option!(folded_g2_elements
+                .iter()
+                .map(AssignedG2Point::to_curve)
+                .collect()),
+            gt_element: unwrap_result_option!(folded_gt_element.to_tuple12()),
         }))
     }
 }
 
 /// Holds the assigned values and points resulting from the folding process.
 #[derive(Clone)]
-pub(crate) struct AssignedWitness<C: CurveAffine> {
+pub(crate) struct AssignedWitness<C: BDCurveAffine> {
     /// Assigned value of the public parameters commitment.
     /// Sourced directly from the `public_params_hash` argument of [`FoldRelaxedPlonkInstanceChip::fold`].
     pub public_params_hash: AssignedPoint<C>,
@@ -303,7 +374,7 @@ pub(crate) struct AssignedWitness<C: CurveAffine> {
     /// Assigned [`RelaxedPlonkInstance`]
     pub assigned_relaxed: AssignedRelaxedPlonkInstance<C>,
 
-    /// Assigned point representing the commitment to the `W` value of the input PLONK instance.
+    /// Assigned points representing the commitments to the `W` value of the input PLONK instance.
     /// Sourced directly from [`PlonkInstance::W_commitments`] provided to [`FoldRelaxedPlonkInstanceChip::fold`].
     input_W_commitments: Vec<AssignedPoint<C>>,
 
@@ -315,12 +386,24 @@ pub(crate) struct AssignedWitness<C: CurveAffine> {
     /// Sourced directly from [`PlonkInstance::challenges`] provided to [`FoldRelaxedPlonkInstanceChip::fold`].
     pub input_challenges: Vec<Vec<AssignedValue<C::Base>>>,
 
+    /// Assigned points representing the commitments to the G1 elements of the input PLONK instance.
+    /// Sourced directly from [`PlonkInstance::g1_elements`] provided to [`FoldRelaxedPlonkInstanceChip::fold`].
+    pub input_g1_elements: Vec<AssignedPoint<C>>,
+
+    /// Assigned points representing the commitments to the G2 elements of the input PLONK instance.
+    /// Sourced directly from [`PlonkInstance::g2_elements`] provided to [`FoldRelaxedPlonkInstanceChip::fold`].
+    pub input_g2_elements: Vec<AssignedG2Point<C>>,
+
     /// Vector of assigned points representing the commitments to the cross terms.
     /// Sourced directly from the `cross_term_commits` argument of [`FoldRelaxedPlonkInstanceChip::fold`].
     cross_terms_commits: Vec<AssignedPoint<C>>,
+
+    /// Vector of assigned tuples representing the commitments to the group cross terms.
+    /// Sourced directly from the `cross_term_gt_commits` argument of [`FoldRelaxedPlonkInstanceChip::fold`].
+    cross_term_gt_commits: Vec<AssignedTuple12<C>>,
 }
 
-impl<C: CurveAffine> ops::Deref for AssignedWitness<C> {
+impl<C: BDCurveAffine> ops::Deref for AssignedWitness<C> {
     type Target = AssignedRelaxedPlonkInstance<C>;
     fn deref(&self) -> &Self::Target {
         &self.assigned_relaxed
@@ -359,9 +442,9 @@ impl From<Error> for halo2_proofs::plonk::Error {
     }
 }
 
-impl<const T: usize, C: CurveAffine> FoldRelaxedPlonkInstanceChip<T, C>
+impl<const T: usize, C: BDCurveAffine> FoldRelaxedPlonkInstanceChip<T, C>
 where
-    C::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C::Base: FromUniformBytes<64>,
 {
     pub fn new(
         relaxed: RelaxedPlonkInstance<C>,
@@ -428,7 +511,57 @@ where
             .collect()
     }
 
-    /// Fold [`RelaxedPlonkInstance::E_commitments`] & [`CrossTermCommits`]
+    /// Fold [`RelaxedPlonkInstance::g1_elements`] & [`PlonkInstance::g1_elements`]
+    fn fold_g1(
+        region: &mut RegionCtx<C::Base>,
+        config: &MainGateConfig<T>,
+        folded_g1: &[AssignedPoint<C>],
+        input_g1_elements: &[AssignedPoint<C>],
+        r: &[AssignedCell<C::Base, C::Base>],
+    ) -> Result<Vec<AssignedPoint<C>>, Error> {
+        let ecc = EccChip::<C, C::Base, T>::new(config.clone());
+
+        folded_g1
+            .iter()
+            .zip_eq(input_g1_elements)
+            .enumerate()
+            .map(|(W_index, (W1, W2))| -> Result<AssignedPoint<C>, Error> {
+                let rW = ecc.scalar_mul(region, W2, r)?;
+                let res = ecc.add(region, W1, &rW)?;
+                debug!(
+                    "W1 = {W1:?}; W2 = {W2:?}; rW2[{W_index}] = {rW:?}; rW1 + rW2 * r = {res:?}"
+                );
+                Ok(res)
+            })
+            .collect()
+    }
+
+    /// Fold [`RelaxedPlonkInstance::g2_elements`] & [`PlonkInstance::g2_elements`]
+    fn fold_g2(
+        region: &mut RegionCtx<C::Base>,
+        config: &MainGateConfig<T>,
+        folded_g2: &[AssignedG2Point<C>],
+        input_g2_elements: &[AssignedG2Point<C>],
+        r: &[AssignedCell<C::Base, C::Base>],
+    ) -> Result<Vec<AssignedG2Point<C>>, Error> {
+        let ecc2 = G2EccChip::<C, C::Base, T>::new(config.clone());
+
+        folded_g2
+            .iter()
+            .zip_eq(input_g2_elements)
+            .enumerate()
+            .map(|(W_index, (W1, W2))| -> Result<AssignedG2Point<C>, Error> {
+                let rW = ecc2.scalar_mul(region, W2, r)?;
+                let res = ecc2.add_g2(region, W1, &rW)?;
+                debug!(
+                    "W1 = {W1:?}; W2 = {W2:?}; rW2[{W_index}] = {rW:?}; rW1 + rW2 * r = {res:?}"
+                );
+                Ok(res)
+            })
+            .collect()
+    }
+
+    /// Fold [`RelaxedPlonkInstance::E_commitment`] & [`CrossTermCommits`]
     ///
     /// # Description
     ///
@@ -492,6 +625,53 @@ where
         Ok(rT
             .into_iter()
             .try_fold(folded_E, |folded_E, rT_i| ecc.add(region, &folded_E, &rT_i))?)
+    }
+
+    /// Fold [`RelaxedPlonkInstance::gt_element`] & [`CrossTermCommits`]
+    fn fold_gt(
+        &self,
+        region: &mut RegionCtx<C::Base>,
+        folded_gt: AssignedTuple12<C>,
+        cross_term_gt_commits: &[AssignedTuple12<C>],
+        r: BigUintView<C::Base>,
+        m_bn: &BigUint<C::Base>,
+    ) -> Result<AssignedTuple12<C>, Error> {
+        debug!("Start calculate r^i from {r:?}");
+
+        let powers_of_r = iter::successors(Some(Ok(r.clone())), |val| {
+            Some(Ok(val.as_ref().ok()?).and_then(|r_pow_i| {
+                let BigUintView {
+                    as_bn_limbs,
+                    as_bits: _,
+                } = r_pow_i;
+
+                let next = self
+                    .bn_chip
+                    .mult_mod(region, as_bn_limbs, &r.as_bn_limbs, m_bn)?
+                    .remainder;
+
+                debug!("Next r^i from {next:?}");
+
+                Result::<_, Error>::Ok(BigUintView {
+                    as_bits: self.bn_chip.to_le_bits(region, &next)?,
+                    as_bn_limbs: next,
+                })
+            }))
+        })
+        .take(cross_term_gt_commits.len())
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let fp12 = Fp12Chip::<C, C::Base, T, 9>::new(self.config.clone());
+        // TODO Check what with all commits
+        let rT = cross_term_gt_commits
+            .iter()
+            .zip(powers_of_r.into_iter())
+            .map(|(commit, r_pow_i)| fp12.scalar_mul(region, commit, &r_pow_i))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rT.into_iter().try_fold(folded_gt, |folded_gt, rT_i| {
+            fp12.mul(region, &folded_gt, &rT_i)
+        })?)
     }
 
     /// Fold `input` with `folded` in bn form
@@ -628,11 +808,11 @@ where
         folded_challenges
             .into_iter()
             .zip_eq(input_challenges)
-            .map(|(folded_challenge, input_challange)| {
+            .map(|(folded_challenge, input_challenge)| {
                 Self::fold_via_biguint(
                     region,
                     bn_chip,
-                    &input_challange,
+                    &input_challenge,
                     folded_challenge,
                     m_bn,
                     r_as_bn,
@@ -711,6 +891,31 @@ where
         .inspect_err(|err| error!("while fold challenges: {err:?}"))?;
         debug!("fold: challenges folded: {new_folded_challenges:?}");
 
+        let new_folded_g1 = Self::fold_g1(
+            region,
+            &self.config,
+            &w.assigned_relaxed.folded_g1_elements,
+            &w.input_g1_elements,
+            &r,
+        )?;
+
+        let new_folded_g2 = Self::fold_g2(
+            region,
+            &self.config,
+            &w.assigned_relaxed.folded_g2_elements,
+            &w.input_g2_elements,
+            &r,
+        )?;
+
+        let new_folded_gt = self.fold_gt(
+            region,
+            w.folded_gt_element.clone(),
+            &w.cross_term_gt_commits,
+            r.clone(),
+            &m_bn,
+        )?;
+        debug!("fold: gt folded: {new_folded_gt:?}");
+
         let assigned_result_of_fold = AssignedRelaxedPlonkInstance {
             folded_W: new_folded_W.clone(),
             folded_E: new_folded_E.clone(),
@@ -718,6 +923,9 @@ where
             folded_X1: new_folded_X1.clone(),
             folded_challenges: new_folded_challenges.clone(),
             folded_u: new_folded_u.clone(),
+            folded_g1_elements: new_folded_g1.clone(),
+            folded_g2_elements: new_folded_g2.clone(),
+            folded_gt_element: new_folded_gt.clone(),
         };
 
         Ok(FoldResult {
@@ -740,6 +948,28 @@ where
                 assign_next_advice_from_point(&mut advice_columns_assigner, region, $input, || {
                     stringify!($input)
                 })
+            }};
+        }
+
+        macro_rules! assign_g2_point {
+            ($input:expr) => {{
+                assign_next_advice_from_g2_point(
+                    &mut advice_columns_assigner,
+                    region,
+                    $input,
+                    || stringify!($input),
+                )
+            }};
+        }
+
+        macro_rules! assign_tuple12 {
+            ($input:expr) => {{
+                assign_next_advice_from_tuple12(
+                    &mut advice_columns_assigner,
+                    region,
+                    $input,
+                    || stringify!($input),
+                )
             }};
         }
 
@@ -782,10 +1012,24 @@ where
             .relaxed
             .challenges
             .iter()
-            .map(|challenge| assign_diff_field_as_bn!(challenge, || "one of challanges"))
+            .map(|challenge| assign_diff_field_as_bn!(challenge, || "one of challenges"))
             .collect::<Result<Vec<_>, _>>()?;
 
         let assigned_u = assign_diff_field!(&self.relaxed.u, || "relaxed u")?;
+
+        let assigned_g1_elements = self
+            .relaxed
+            .g1_elements
+            .iter()
+            .map(|g1i| assign_point!(g1i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let assigned_g2_elements = self
+            .relaxed
+            .g2_elements
+            .iter()
+            .map(|g2i| assign_g2_point!(g2i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let assigned_gt_element = assign_tuple12!(&self.relaxed.gt_element)?;
 
         Ok(AssignedRelaxedPlonkInstance {
             folded_W: assigned_W,
@@ -794,6 +1038,9 @@ where
             folded_challenges: assigned_challenges,
             folded_X0: assigned_X0,
             folded_X1: assigned_X1,
+            folded_g1_elements: assigned_g1_elements,
+            folded_g2_elements: assigned_g2_elements,
+            folded_gt_element: assigned_gt_element,
         })
     }
 
@@ -807,6 +1054,7 @@ where
         public_params_hash: &C,
         input_plonk: &PlonkInstance<C>,
         cross_term_commits: &[C],
+        cross_term_gt_commits: &[Tuple12<C>],
         mut ro_circuit: impl ROCircuitTrait<C::Base>,
     ) -> Result<(AssignedWitness<C>, Vec<AssignedBit<C::Base>>), Error> {
         let mut advice_columns_assigner = self.config.advice_cycle_assigner();
@@ -824,6 +1072,48 @@ where
                     WrapValue::Assigned(output.x.clone()),
                     WrapValue::Assigned(output.y.clone()),
                 ]);
+
+                Result::<_, Error>::Ok(output)
+            }};
+        }
+
+        macro_rules! assign_and_absorb_g2_point {
+            ($input:expr) => {{
+                let output = assign_next_advice_from_g2_point(
+                    &mut advice_columns_assigner,
+                    region,
+                    $input,
+                    || stringify!($input),
+                )?;
+
+                ro_circuit.absorb_g2_point([
+                    WrapValue::Assigned(output.x.0.clone()),
+                    WrapValue::Assigned(output.x.1.clone()),
+                    WrapValue::Assigned(output.y.0.clone()),
+                    WrapValue::Assigned(output.y.1.clone()),
+                ]);
+
+                Result::<_, Error>::Ok(output)
+            }};
+        }
+
+        macro_rules! assign_and_absorb_tuple12 {
+            ($input:expr) => {{
+                let output = assign_next_advice_from_tuple12(
+                    &mut advice_columns_assigner,
+                    region,
+                    $input,
+                    || stringify!($input),
+                )?;
+
+                let wrap_values: [WrapValue<C::Base>; 12] = output
+                    .elements()
+                    .iter()
+                    .map(|&elem| WrapValue::Assigned(elem.clone()))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("Should always have 12 elements");
+                ro_circuit.absorb_fp12_tuple(wrap_values);
 
                 Result::<_, Error>::Ok(output)
             }};
@@ -878,12 +1168,26 @@ where
             .challenges
             .iter()
             .map(|challenge| {
-                assign_and_absorb_diff_field_as_bn!(challenge, || "one of challanges")
+                assign_and_absorb_diff_field_as_bn!(challenge, || "one of challenges")
                     .map(|bn| bn.1)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let assigned_u = assign_and_absorb_diff_field!(&self.relaxed.u, || "relaxed u")?;
+
+        let assigned_g1_elements = self
+            .relaxed
+            .g1_elements
+            .iter()
+            .map(|g1i| assign_and_absorb_point!(g1i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let assigned_g2_elements = self
+            .relaxed
+            .g2_elements
+            .iter()
+            .map(|g2i| assign_and_absorb_g2_point!(g2i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let assigned_gt_element = assign_and_absorb_tuple12!(&self.relaxed.gt_element)?;
 
         let assigned_relaxed = AssignedRelaxedPlonkInstance {
             folded_W: assigned_W,
@@ -892,6 +1196,9 @@ where
             folded_challenges: assigned_challenges,
             folded_X0: assigned_X0,
             folded_X1: assigned_X1,
+            folded_g1_elements: assigned_g1_elements,
+            folded_g2_elements: assigned_g2_elements,
+            folded_gt_element: assigned_gt_element,
         };
 
         let assigned_instance_W_commitment_coordinates = input_plonk
@@ -910,7 +1217,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let assigned_challanges_instance = input_plonk
+        let assigned_challenges_instance = input_plonk
             .challenges
             .iter()
             .enumerate()
@@ -920,9 +1227,26 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let assigned_instance_g1_commitment_coordinates = input_plonk
+            .g1_elements
+            .iter()
+            .map(|com| assign_and_absorb_point!(com))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let assigned_instance_g2_commitment_coordinates = input_plonk
+            .g2_elements
+            .iter()
+            .map(|com| assign_and_absorb_g2_point!(com))
+            .collect::<Result<Vec<_>, _>>()?;
+
         let assigned_cross_term_commits = cross_term_commits
             .iter()
             .map(|cross_term_commit| assign_and_absorb_point!(cross_term_commit))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let assigned_cross_term_gt_commits = cross_term_gt_commits
+            .iter()
+            .map(|cross_term_gt_commit| assign_and_absorb_tuple12!(cross_term_gt_commit))
             .collect::<Result<Vec<_>, _>>()?;
 
         region.next();
@@ -934,10 +1258,13 @@ where
             AssignedWitness {
                 public_params_hash: assigned_public_params_hash,
                 assigned_relaxed,
-                input_challenges: assigned_challanges_instance,
+                input_challenges: assigned_challenges_instance,
                 input_W_commitments: assigned_instance_W_commitment_coordinates,
+                input_g1_elements: assigned_instance_g1_commitment_coordinates,
+                input_g2_elements: assigned_instance_g2_commitment_coordinates,
                 input_instance: assigned_input_instance,
                 cross_terms_commits: assigned_cross_term_commits,
+                cross_term_gt_commits: assigned_cross_term_gt_commits,
             },
             r,
         ))
@@ -972,7 +1299,7 @@ fn scalar_module_as_bn<C: CurveAffine>(
     )
 }
 
-fn scalar_module_as_limbs<C: CurveAffine>(
+fn scalar_module_as_limbs<C: BDCurveAffine>(
     limb_width: NonZeroUsize,
     limbs_count: NonZeroUsize,
 ) -> Result<Vec<C::Base>, big_uint::Error> {
@@ -981,7 +1308,7 @@ fn scalar_module_as_limbs<C: CurveAffine>(
         .to_vec())
 }
 
-pub(crate) fn assign_next_advice_from_point<C: CurveAffine, AR: Into<String>>(
+pub(crate) fn assign_next_advice_from_point<C: BDCurveAffine, AR: Into<String>>(
     assignor: &mut impl AdviceCyclicAssignor<C::Base>,
     region: &mut RegionCtx<C::Base>,
     input: &C,
@@ -999,7 +1326,40 @@ pub(crate) fn assign_next_advice_from_point<C: CurveAffine, AR: Into<String>>(
     })
 }
 
-fn assign_next_advice_from_diff_field<C: CurveAffine, AR: Into<String>>(
+pub(crate) fn assign_next_advice_from_g2_point<C: BDCurveAffine, AR: Into<String>>(
+    assignor: &mut impl AdviceCyclicAssignor<C::Base>,
+    region: &mut RegionCtx<C::Base>,
+    input: &G2Point<C, C::ScalarExt>,
+    annotation: impl Fn() -> AR,
+) -> Result<AssignedG2Point<C>, Error> {
+    Ok(AssignedG2Point::<C> {
+        x: (
+            assignor.assign_next_advice(region, &annotation, input.x.c0)?,
+            assignor.assign_next_advice(region, &annotation, input.x.c1)?,
+        ),
+        y: (
+            assignor.assign_next_advice(region, &annotation, input.y.c0)?,
+            assignor.assign_next_advice(region, &annotation, input.y.c1)?,
+        ),
+    })
+}
+
+pub(crate) fn assign_next_advice_from_tuple12<C: BDCurveAffine, AR: Into<String>>(
+    assignor: &mut impl AdviceCyclicAssignor<C::Base>,
+    region: &mut RegionCtx<C::Base>,
+    input: &Tuple12<C>,
+    annotation: impl Fn() -> AR,
+) -> Result<AssignedTuple12<C>, Error> {
+    let elements: Result<Vec<_>, _> = input
+        .elements
+        .iter()
+        .map(|&elem| assignor.assign_next_advice(region, &annotation, elem))
+        .collect();
+
+    Ok(AssignedTuple12::new(elements?))
+}
+
+fn assign_next_advice_from_diff_field<C: BDCurveAffine, AR: Into<String>>(
     assignor: &mut impl AdviceCyclicAssignor<C::Base>,
     region: &mut RegionCtx<C::Base>,
     input: &impl PrimeField,
@@ -1013,7 +1373,7 @@ fn assign_next_advice_from_diff_field<C: CurveAffine, AR: Into<String>>(
     Ok(assignor.assign_next_advice(region, annotation, val)?)
 }
 
-pub struct FoldResult<C: CurveAffine> {
+pub struct FoldResult<C: BDCurveAffine> {
     pub assigned_input: AssignedWitness<C>,
     pub assigned_result_of_fold: AssignedRelaxedPlonkInstance<C>,
 }
@@ -1042,15 +1402,19 @@ mod tests {
     type Base = <C1 as CurveAffine>::Base;
     type ScalarExt = <C1 as CurveAffine>::ScalarExt;
 
-    const T: usize = 6;
+    const T: usize = 5;
+    const XI_0: i64 = 9;
     const NUM_WITNESS: usize = 5;
     const NUM_INSTANCES: usize = 2;
     const NUM_CHALLENGES: usize = 5;
+    const NUM_G1_ELEMENTS: usize = 3;
+    const NUM_G2_ELEMENTS: usize = 2;
+    const NUM_GT_CROSS_TERMS: usize = 4;
     /// When the number of fold rounds increases, `K` must be increased too
     /// as the number of required rows in the table grows.
     const NUM_OF_FOLD_ROUNDS: usize = 3;
     /// 2 ^ K is count of table rows in [`TableData`]
-    const K: u32 = 20;
+    const K: u32 = 23;
 
     const LIMB_WIDTH: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(64) };
     const LIMBS_COUNT: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(10) };
@@ -1072,6 +1436,24 @@ mod tests {
             .collect::<Vec<_>>()
     }
 
+    fn random_g1_vec(mut rnd: impl Rng) -> Vec<C1> {
+        iter::repeat_with(|| C1::random(&mut rnd))
+            .take(NUM_G1_ELEMENTS)
+            .collect::<Vec<_>>()
+    }
+
+    fn random_g2_vec(mut rnd: impl Rng) -> Vec<G2Point<C1, <C1 as CurveAffine>::ScalarExt>> {
+        iter::repeat_with(|| G2Point::<C1, <C1 as CurveAffine>::ScalarExt>::random(&mut rnd))
+            .take(NUM_G2_ELEMENTS)
+            .collect::<Vec<_>>()
+    }
+
+    fn random_fp12_vec(mut rnd: impl Rng) -> Vec<Tuple12<C1>> {
+        iter::repeat_with(|| Tuple12::random::<<C1 as CurveAffine>::ScalarExt, 9>(&mut rnd))
+            .take(NUM_GT_CROSS_TERMS)
+            .collect::<Vec<_>>()
+    }
+
     fn assign_curve_points<C, const T: usize>(
         ctx: &mut RegionCtx<C::Base>,
         ecc: &EccChip<C, C::Base, T>,
@@ -1089,6 +1471,50 @@ mod tests {
             .collect()
     }
 
+    fn assign_g2_curve_points<C, F, const T: usize>(
+        ctx: &mut RegionCtx<'_, F>,
+        g2_chip: &G2EccChip<C, F, T>,
+        points: &[G2Point<C, C::ScalarExt>],
+        var_prefix: &str,
+    ) -> Result<Vec<AssignedG2Point<C>>, halo2_proofs::plonk::Error>
+    where
+        C: CurveAffine<Base = F>,
+        F: PrimeField + PrimeFieldBits,
+        C::ScalarExt: PrimeFieldBits,
+    {
+        points
+            .iter()
+            .enumerate()
+            .map(|(i, point)| {
+                g2_chip.assign_g2_point(
+                    ctx,
+                    || format!("{var_prefix}[{i}]"),
+                    Some(((point.x.c0, point.x.c1), (point.y.c0, point.y.c1))),
+                )
+            })
+            .collect()
+    }
+
+    fn assign_fp12_points<C, F, const T: usize>(
+        ctx: &mut RegionCtx<'_, F>,
+        fp12_chip: &Fp12Chip<C, F, T, XI_0>,
+        points: &[Tuple12<C>],
+        var_prefix: &str,
+    ) -> Result<Vec<AssignedTuple12<C>>, halo2_proofs::plonk::Error>
+    where
+        C: CurveAffine<Base = F>,
+        F: PrimeField + PrimeFieldBits,
+        C::ScalarExt: PrimeFieldBits,
+    {
+        points
+            .iter()
+            .enumerate()
+            .map(|(i, point)| {
+                fp12_chip.assign_tuple(ctx, || format!("{var_prefix}[{i}]"), Some(point.elements))
+            })
+            .collect()
+    }
+
     /// The test utility struct
     /// It provides a convenient setup for testing the functionality of `FoldRelaxedPlonkInstanceChip`.
     /// Includes configured table data, a main gate config, random number generator, ECC and gate chips, and a random scalar.
@@ -1098,6 +1524,8 @@ mod tests {
         config: MainGateConfig<T>,
         rnd: ThreadRng,
         ecc: EccChip<C1, Base, T>,
+        ecc2: G2EccChip<C1, Base, T>,
+        fp12: Fp12Chip<C1, Base, T, 9>,
         gate: MainGate<Base, T>,
         r: ScalarExt,
     }
@@ -1111,6 +1539,8 @@ mod tests {
                 ws,
                 r: ScalarExt::from_u128(rnd.gen()),
                 ecc: EccChip::<C1, Base, T>::new(config.clone()),
+                ecc2: G2EccChip::<C1, Base, T>::new(config.clone()),
+                fp12: Fp12Chip::<C1, Base, T, 9>::new(config.clone()),
                 gate: MainGate::new(config.clone()),
                 config,
                 rnd,
@@ -1131,6 +1561,14 @@ mod tests {
             challenges: iter::repeat_with(|| ScalarExt::random(&mut rnd))
                 .take(NUM_CHALLENGES)
                 .collect(),
+            g1_elements: iter::repeat_with(|| C1::random(&mut rnd))
+                .take(NUM_G1_ELEMENTS)
+                .collect(),
+            g2_elements: iter::repeat_with(|| {
+                G2Point::<C1, <C1 as CurveAffine>::ScalarExt>::random(&mut rnd)
+            })
+            .take(NUM_G2_ELEMENTS)
+            .collect(),
         }
     }
 
@@ -1152,11 +1590,12 @@ mod tests {
 
         let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
 
-        let spec = Spec::<Base, T, 5>::new(10, 10);
+        let spec = Spec::<Base, T, { T - 1 }>::new(10, 10);
 
         for _round in 0..=NUM_OF_FOLD_ROUNDS {
             let plonk = generate_random_plonk_instance(&mut rnd);
             let cross_term_commits = random_curve_vec(&mut rnd);
+            let cross_term_gt_commits = random_fp12_vec(&mut rnd);
             let pp_hash = C1::random(&mut rnd);
 
             let on_circuit_challenge = layouter
@@ -1169,6 +1608,7 @@ mod tests {
                                 &pp_hash,
                                 &plonk,
                                 &cross_term_commits,
+                                &cross_term_gt_commits,
                                 PoseidonChip::new(config.clone(), spec.clone()),
                             )
                             .unwrap();
@@ -1193,6 +1633,7 @@ mod tests {
                     &relaxed,
                     &plonk,
                     &cross_term_commits,
+                    &cross_term_gt_commits,
                 )
                 .to_repr()
                 .as_ref()
@@ -1220,13 +1661,14 @@ mod tests {
             ecc,
             gate,
             r,
+            ..
         } = Fixture::default();
 
         let mut folded_W = vec![CommitmentKey::<C1>::default_value(); NUM_WITNESS];
 
         let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
 
-        let mut plonk = RelaxedPlonkInstance::<C1>::new(0, 0, NUM_WITNESS);
+        let mut plonk = RelaxedPlonkInstance::<C1>::new(0, 0, NUM_WITNESS, 0, 0);
 
         for _round in 0..=NUM_OF_FOLD_ROUNDS {
             let input_W = random_curve_vec(&mut rnd);
@@ -1261,7 +1703,10 @@ mod tests {
                     W_commitments: input_W.clone(),
                     instance: vec![],
                     challenges: vec![],
+                    g1_elements: vec![],
+                    g2_elements: vec![],
                 },
+                &[],
                 &[],
                 &r,
             );
@@ -1297,16 +1742,17 @@ mod tests {
             ecc,
             gate,
             r,
+            ..
         } = Fixture::default();
 
         let mut folded_E = C1::default();
 
         let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
 
-        let mut plonk = RelaxedPlonkInstance::<C1>::new(0, 0, 0);
+        let mut plonk = RelaxedPlonkInstance::<C1>::new(0, 0, 0, 0, 0);
 
         let chip = FoldRelaxedPlonkInstanceChip::<T, C1>::new(
-            RelaxedPlonkInstance::new(0, 0, 0),
+            RelaxedPlonkInstance::new(0, 0, 0, 0, 0),
             LIMB_WIDTH,
             LIMBS_COUNT,
             config.clone(),
@@ -1355,8 +1801,11 @@ mod tests {
                     W_commitments: vec![],
                     instance: vec![],
                     challenges: vec![],
+                    g1_elements: vec![],
+                    g2_elements: vec![],
                 },
                 &cross_term_commits,
+                &[],
                 &r,
             );
 
@@ -1387,7 +1836,7 @@ mod tests {
 
         let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
 
-        let mut relaxed_plonk = RelaxedPlonkInstance::<C1>::new(2, 0, 0);
+        let mut relaxed_plonk = RelaxedPlonkInstance::<C1>::new(2, 0, 0, 0, 0);
 
         let bn_chip = BigUintMulModChip::<Base>::new(
             config
@@ -1482,7 +1931,10 @@ mod tests {
                     W_commitments: vec![],
                     instance: input_instances.to_vec(),
                     challenges: vec![],
+                    g1_elements: vec![],
+                    g2_elements: vec![],
                 },
+                &[],
                 &[],
                 &r,
             );
@@ -1529,7 +1981,7 @@ mod tests {
 
         let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
 
-        let mut relaxed_plonk = RelaxedPlonkInstance::<C1>::new(0, NUM_CHALLENGES, 0);
+        let mut relaxed_plonk = RelaxedPlonkInstance::<C1>::new(0, NUM_CHALLENGES, 0, 0, 0);
 
         let bn_chip = BigUintMulModChip::<Base>::new(
             config
@@ -1545,7 +1997,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             // Run twice for setup & real run
-            let on_circuit_challanges_cell = layouter.assign_region(
+            let on_circuit_challenges_cell = layouter.assign_region(
                 || "fold challenges test",
                 |region| {
                     let mut ctx = RegionCtx::new(region, 0);
@@ -1623,7 +2075,10 @@ mod tests {
                     W_commitments: vec![],
                     instance: vec![],
                     challenges: input_challenges.to_vec(),
+                    g1_elements: vec![],
+                    g2_elements: vec![],
                 },
+                &[],
                 &[],
                 &r,
             );
@@ -1643,7 +2098,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
-            let on_circuit_challenges = on_circuit_challanges_cell
+            let on_circuit_challenges = on_circuit_challenges_cell
                 .unwrap()
                 .into_iter()
                 .map(|c| {
@@ -1659,8 +2114,267 @@ mod tests {
 
     #[traced_test]
     #[test]
+    fn fold_g1_test() {
+        let Fixture {
+            mut ws,
+            config,
+            mut rnd,
+            ecc,
+            gate,
+            r,
+            ..
+        } = Fixture::default();
+
+        let mut folded_g1 = vec![CommitmentKey::<C1>::default_value(); NUM_G1_ELEMENTS];
+
+        let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
+
+        let mut plonk = RelaxedPlonkInstance::<C1>::new(0, 0, 0, NUM_G1_ELEMENTS, 0);
+
+        for _round in 0..=NUM_OF_FOLD_ROUNDS {
+            let input_g1 = random_g1_vec(&mut rnd);
+
+            let on_circuit_g1_cell = layouter.assign_region(
+                || "fold g1 test",
+                |region| {
+                    let mut ctx = RegionCtx::new(region, 0);
+
+                    let folded = assign_curve_points(&mut ctx, &ecc, &folded_g1, "folded_g1")?;
+                    let input = assign_curve_points(&mut ctx, &ecc, &input_g1, "input_g1")?;
+
+                    let assigned_r = ctx.assign_advice(
+                        || "r",
+                        config.state[0],
+                        Value::known(util::fe_to_fe(&r).unwrap()),
+                    )?;
+
+                    let r = gate.le_num_to_bits(&mut ctx, assigned_r, MAX_BITS)?;
+
+                    Ok(FoldRelaxedPlonkInstanceChip::<T, C1>::fold_g1(
+                        &mut ctx, &config, &folded, &input, &r,
+                    )
+                    .unwrap())
+                },
+            );
+
+            assert_eq!(plonk.g1_elements, folded_g1);
+
+            plonk = plonk.fold(
+                &PlonkInstance {
+                    W_commitments: vec![],
+                    instance: vec![],
+                    challenges: vec![],
+                    g1_elements: input_g1.clone(),
+                    g2_elements: vec![],
+                },
+                &[],
+                &[],
+                &r,
+            );
+
+            let off_circuit_g1 = plonk
+                .g1_elements
+                .iter()
+                .map(|c| {
+                    let coordinates = c.coordinates().unwrap();
+                    (*coordinates.x(), *coordinates.y())
+                })
+                .collect::<Vec<_>>();
+
+            let on_circuit_g1_cell = on_circuit_g1_cell
+                .unwrap()
+                .into_iter()
+                .map(|c| c.coordinates_values().unwrap())
+                .collect::<Vec<_>>();
+
+            assert_eq!(off_circuit_g1, on_circuit_g1_cell);
+
+            folded_g1.clone_from(&plonk.g1_elements);
+        }
+    }
+
+    #[traced_test]
+    #[test]
+    fn fold_g2_test() {
+        let Fixture {
+            mut ws,
+            config,
+            mut rnd,
+            ecc2,
+            gate,
+            r,
+            ..
+        } = Fixture::default();
+
+        let mut folded_g2 =
+            vec![G2Point::<C1, <C1 as CurveAffine>::ScalarExt>::default(); NUM_G2_ELEMENTS];
+
+        let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
+
+        let mut plonk = RelaxedPlonkInstance::<C1>::new(0, 0, 0, 0, NUM_G2_ELEMENTS);
+
+        for _round in 0..=NUM_OF_FOLD_ROUNDS {
+            let input_g2 = random_g2_vec(&mut rnd);
+
+            let on_circuit_g2_cell = layouter.assign_region(
+                || "fold g2 test",
+                |region| {
+                    let mut ctx = RegionCtx::new(region, 0);
+
+                    let folded = assign_g2_curve_points(&mut ctx, &ecc2, &folded_g2, "folded_g2")?;
+                    let input = assign_g2_curve_points(&mut ctx, &ecc2, &input_g2, "input_g2")?;
+
+                    let assigned_r = ctx.assign_advice(
+                        || "r",
+                        config.state[0],
+                        Value::known(util::fe_to_fe(&r).unwrap()),
+                    )?;
+
+                    let r = gate.le_num_to_bits(&mut ctx, assigned_r, MAX_BITS)?;
+
+                    Ok(FoldRelaxedPlonkInstanceChip::<T, C1>::fold_g2(
+                        &mut ctx, &config, &folded, &input, &r,
+                    )
+                    .unwrap())
+                },
+            );
+
+            assert_eq!(plonk.g2_elements, folded_g2);
+
+            plonk = plonk.fold(
+                &PlonkInstance {
+                    W_commitments: vec![],
+                    instance: vec![],
+                    challenges: vec![],
+                    g1_elements: vec![],
+                    g2_elements: input_g2.clone(),
+                },
+                &[],
+                &[],
+                &r,
+            );
+
+            let off_circuit_g2 = plonk
+                .g2_elements
+                .iter()
+                .map(|c| (c.x.clone(), c.y.clone()))
+                .collect::<Vec<_>>();
+
+            let on_circuit_g2_cell = on_circuit_g2_cell
+                .unwrap()
+                .into_iter()
+                .map(|c| c.coordinates_values().unwrap())
+                .collect::<Vec<_>>();
+
+            assert_eq!(off_circuit_g2, on_circuit_g2_cell);
+
+            folded_g2.clone_from(&plonk.g2_elements);
+        }
+    }
+
+    #[traced_test]
+    #[test]
+    fn fold_gt_test() {
+        let Fixture {
+            mut ws,
+            config,
+            mut rnd,
+            fp12,
+            gate,
+            r,
+            ..
+        } = Fixture::default();
+
+        let mut folded_gt = Tuple12::<C1>::one();
+
+        let mut layouter = SingleChipLayouter::new(&mut ws, vec![]).unwrap();
+
+        let mut plonk = RelaxedPlonkInstance::<C1>::new(0, 0, 0, 0, 0);
+
+        let chip = FoldRelaxedPlonkInstanceChip::<T, C1>::new(
+            RelaxedPlonkInstance::new(0, 0, 0, 0, 0),
+            LIMB_WIDTH,
+            LIMBS_COUNT,
+            config.clone(),
+        );
+
+        for _round in 0..=NUM_OF_FOLD_ROUNDS {
+            let cross_term_gt_commits = random_fp12_vec(&mut rnd);
+
+            let on_circuit_gt_cell = layouter.assign_region(
+                || "fold gt test",
+                |region| {
+                    let mut ctx = RegionCtx::new(region, 0);
+
+                    let folded_gt =
+                        fp12.assign_tuple(&mut ctx, || "folded_gt", Some(folded_gt.elements))?;
+                    let cross_term_gt_commits =
+                        assign_fp12_points(&mut ctx, &fp12, &cross_term_gt_commits, "input_gt")?;
+
+                    let assigned_r = ctx.assign_advice(
+                        || "r",
+                        config.state[0],
+                        Value::known(util::fe_to_fe(&r).unwrap()),
+                    )?;
+
+                    let r =
+                        gate.le_num_to_bits(&mut ctx, assigned_r.clone(), NUM_CHALLENGE_BITS)?;
+                    let r_vv = BigUintView {
+                        as_bn_limbs: chip
+                            .bn_chip
+                            .from_assigned_cell_to_limbs(&mut ctx, &assigned_r)
+                            .unwrap(),
+                        as_bits: r,
+                    };
+
+                    let m_bn = scalar_module_as_bn::<C1>(LIMB_WIDTH, LIMBS_COUNT).unwrap();
+
+                    Ok(chip
+                        .fold_gt(&mut ctx, folded_gt, &cross_term_gt_commits, r_vv, &m_bn)
+                        .unwrap())
+                },
+            );
+
+            assert_eq!(plonk.gt_element, folded_gt);
+
+            plonk = plonk.fold(
+                &PlonkInstance {
+                    W_commitments: vec![],
+                    instance: vec![],
+                    challenges: vec![],
+                    g1_elements: vec![],
+                    g2_elements: vec![],
+                },
+                &[],
+                &cross_term_gt_commits,
+                &r,
+            );
+
+            let off_circuit_gt_elements = plonk.gt_element.elements;
+
+            let on_circuit_gt_elements = on_circuit_gt_cell
+                .unwrap()
+                .elements()
+                .into_iter()
+                .map(|e| e.value().copied().unwrap())
+                .collect::<Option<Vec<_>>>()
+                .unwrap();
+
+            assert_eq!(off_circuit_gt_elements.len(), 12);
+            assert_eq!(on_circuit_gt_elements.len(), 12);
+
+            for i in 0..12 {
+                assert_eq!(off_circuit_gt_elements[i], on_circuit_gt_elements[i]);
+            }
+
+            folded_gt.clone_from(&plonk.gt_element);
+        }
+    }
+
+    #[traced_test]
+    #[test]
     fn fold_all() {
-        const T: usize = 6;
+        const T: usize = 5;
 
         let Fixture {
             mut ws,
@@ -1672,12 +2386,19 @@ mod tests {
 
         let spec = Spec::<Base, T, { T - 1 }>::new(10, 10);
 
-        let mut relaxed = RelaxedPlonkInstance::new(NUM_INSTANCES, NUM_CHALLENGES, NUM_WITNESS);
+        let mut relaxed = RelaxedPlonkInstance::new(
+            NUM_INSTANCES,
+            NUM_CHALLENGES,
+            NUM_WITNESS,
+            NUM_G1_ELEMENTS,
+            NUM_G2_ELEMENTS,
+        );
 
         for _round in 0..=NUM_OF_FOLD_ROUNDS {
             let input_plonk = generate_random_plonk_instance(&mut rnd);
             let pp_hash = C1::random(&mut rnd);
             let cross_term_commits = random_curve_vec(&mut rnd);
+            let cross_term_gt_commits = random_fp12_vec(&mut rnd);
 
             let on_circuit_relaxed = layouter
                 .assign_region(
@@ -1697,6 +2418,7 @@ mod tests {
                             &pp_hash,
                             &input_plonk,
                             &cross_term_commits,
+                            &cross_term_gt_commits,
                             PoseidonChip::new(config.clone(), spec.clone()),
                         )?;
 
@@ -1715,9 +2437,15 @@ mod tests {
                 &relaxed,
                 &input_plonk,
                 &cross_term_commits,
+                &cross_term_gt_commits,
             );
 
-            relaxed = relaxed.fold(&input_plonk, &cross_term_commits, &off_circuit_r);
+            relaxed = relaxed.fold(
+                &input_plonk,
+                &cross_term_commits,
+                &cross_term_gt_commits,
+                &off_circuit_r,
+            );
 
             assert_eq!(on_circuit_relaxed, relaxed);
         }
@@ -1729,12 +2457,20 @@ mod tests {
         relaxed: &RelaxedPlonkInstance<C1>,
         input: &PlonkInstance<C1>,
         cross_term_commits: &[C1],
+        cross_term_gt_commits: &[Tuple12<C1>],
     ) -> ScalarExt {
         const K: usize = 5;
 
         let mut ro = PoseidonHash::new(spec.clone());
 
-        VanillaFS::generate_challenge(&pp_hash, &mut ro, relaxed, input, cross_term_commits)
-            .unwrap()
+        VanillaFS::generate_challenge(
+            &pp_hash,
+            &mut ro,
+            relaxed,
+            input,
+            cross_term_commits,
+            cross_term_gt_commits,
+        )
+        .unwrap()
     }
 }

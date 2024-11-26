@@ -1,16 +1,18 @@
 [package]
-name = "sirius"
-version = "0.1.0"
+name = "mira"
+version = "0.2.0"
 authors = [
-    "chaosma chao@snarkify.io",
-    "cyphersnake mikhail@snarkify.io",
+    "chaosma <chao@snarkify.io>",
+    "cyphersnake <mikhail@snarkify.io>",
+    "joshbeal <josh@beal.io>",
 ]
-repository = "https://github.com/snarkify/sirius"
-description = "A Plonkish folding framework for Incrementally Verifiable Computation (IVC)."
+repository = "https://github.com/joshbeal/mira"
+description = "An efficient folding framework for pairing-based arguments."
 keywords = [
     "cryptography",
     "ivc",
     "nova",
+    "mira",
     "proof-system",
     "protogalaxy",
     "zero-knowledge-proofs",
@@ -24,26 +26,40 @@ bincode = "1.3"
 bitter = "0.7.0"
 count-to-non-zero = "0.3.0"
 digest = "0.10"
+hex = { version = "0.4.3" }
 itertools = "0.13.0"
 num-bigint = "0.4.3"
 num-traits = "0.2.16"
 rand = "0.8"
 rand_core = { version = "0.6", default-features = false }
+rand_chacha = "0.3"
 rayon = "1.5.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_arrays = "0.1.0"
+sha2 = { version = "^0.10" }
 sha3 = "0.10"
 some-to-err = "0.2.1"
+subtle = "2.4"
 thiserror = "1"
 tracing = { version = "0.1", features = ["attributes"] }
 
+ark-bn254 = "0.4.0"
+ark-ff = { version = "0.4.2", default-features = false }
+ark-ec = { version = "0.4.2", default-features = false }
+ark-serialize = { version = "0.4.2", default-features = false, features = [ "derive" ] }
+ark-poly = { version = "0.4.2", default-features = false }
+ark-std = { version = "0.4.0", default-features = false }
+ark-relations = { version = "0.4.0", default-features = false }
+ark-crypto-primitives = { version = "0.4.0", default-features = false }
+ark-groth16 = { version = "0.4.0", default-features = false }
+
 [dependencies.poseidon]
-git = "https://github.com/privacy-scaling-explorations/poseidon"
-rev = "807f8f555313f726ca03bdf941f798098f488ba4"
+git = "https://github.com/joshbeal/poseidon"
+branch = "joshbeal/dev-mira"
 
 [dependencies.halo2_proofs]
-git = "https://github.com/snarkify/halo2"
-branch = "snarkify/dev.scroll.alpha.2"
+git = "https://github.com/joshbeal/halo2"
+branch = "joshbeal/dev-mira"
 
 [dev-dependencies]
 bincode = "1.3"
@@ -53,6 +69,7 @@ dhat = "0.3.3"
 git2 = "0.19.0"
 maplit = "1.0.2"
 prettytable-rs = "0.10.0"
+rand_xorshift = "0.3"
 tempfile = "3.9.0"
 tracing-subscriber = { version = "0.3.18", features = ["json"] }
 tracing-test = "0.2.4"

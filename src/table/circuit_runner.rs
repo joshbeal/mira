@@ -11,6 +11,8 @@ use crate::{
 
 pub type Witness<F> = Vec<Vec<F>>;
 
+// TODO(jbeal): Add correct group elements to circuit runner
+
 #[derive(Debug, Clone)]
 pub struct CircuitRunner<F: PrimeField, CT: Circuit<F>> {
     pub(crate) k: u32,
@@ -18,10 +20,22 @@ pub struct CircuitRunner<F: PrimeField, CT: Circuit<F>> {
     pub(crate) cs: ConstraintSystem<F>,
     pub(crate) config: CT::Config,
     pub(crate) instance: Vec<F>,
+    pub(crate) num_g1: u32,
+    pub(crate) num_g2: u32,
+    pub(crate) gt_deg: u32,
+    pub(crate) gt_cnt: u32,
 }
 
 impl<F: PrimeField, CT: Circuit<F>> CircuitRunner<F, CT> {
-    pub fn new(k: u32, circuit: CT, instance: Vec<F>) -> Self {
+    pub fn new(
+        k: u32,
+        circuit: CT,
+        instance: Vec<F>,
+        num_g1: u32,
+        num_g2: u32,
+        gt_deg: u32,
+        gt_cnt: u32,
+    ) -> Self {
         let mut cs = ConstraintSystem::default();
 
         CircuitRunner {
@@ -30,6 +44,10 @@ impl<F: PrimeField, CT: Circuit<F>> CircuitRunner<F, CT> {
             circuit,
             cs,
             instance,
+            num_g1,
+            num_g2,
+            gt_deg,
+            gt_cnt,
         }
     }
 
@@ -41,8 +59,19 @@ impl<F: PrimeField, CT: Circuit<F>> CircuitRunner<F, CT> {
             round_sizes,
             gates,
             custom_gates_lookup_compressed,
+            num_g1_elements,
+            num_g2_elements,
+            target_group_folding_degree,
+            target_group_cross_terms,
             ..
-        } = ConstraintSystemMetainfo::build(self.k as usize, &self.cs);
+        } = ConstraintSystemMetainfo::build(
+            self.k as usize,
+            self.num_g1 as usize,
+            self.num_g2 as usize,
+            self.gt_deg as usize,
+            self.gt_cnt as usize,
+            &self.cs,
+        );
         debug!("meta info is ready");
 
         debug!("start preprocessing");
@@ -65,6 +94,10 @@ impl<F: PrimeField, CT: Circuit<F>> CircuitRunner<F, CT> {
             gates,
             permutation_matrix,
             lookup_arguments: plonk::lookup::Arguments::compress_from(&self.cs),
+            num_g1_elems: num_g1_elements,
+            num_g2_elems: num_g2_elements,
+            target_group_folding_degree,
+            target_group_cross_terms,
         })
     }
 

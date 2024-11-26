@@ -9,8 +9,13 @@ use itertools::Itertools;
 
 use crate::{
     ff::{PrimeField, PrimeFieldBits},
-    gadgets::ecc::AssignedPoint,
+    gadgets::{
+        ecc::AssignedPoint,
+        ecc2::{AssignedG2Point, G2Point},
+        fp12::{AssignedTuple12, Tuple12},
+    },
     halo2curves::{Coordinates, CurveAffine},
+    traits::BDCurveAffine,
     util::{self, normalize_trailing_zeros},
 };
 
@@ -211,12 +216,53 @@ impl<F: PrimeField> WrapValue<F> {
 
     pub fn from_assigned_point<C>(input: &AssignedPoint<C>) -> [Self; 2]
     where
-        C: CurveAffine<Base = F>,
+        C: BDCurveAffine<Base = F>,
     {
         [
             Self::Assigned(input.x.clone()),
             Self::Assigned(input.y.clone()),
         ]
+    }
+
+    pub fn from_g2_point<C>(input: &G2Point<C, C::ScalarExt>) -> Option<[Self; 4]>
+    where
+        C: BDCurveAffine<Base = F>,
+    {
+        Some([
+            Self::Unassigned(Value::known(input.x.c0)),
+            Self::Unassigned(Value::known(input.x.c1)),
+            Self::Unassigned(Value::known(input.y.c0)),
+            Self::Unassigned(Value::known(input.y.c1)),
+        ])
+    }
+
+    pub fn from_assigned_g2_point<C>(input: &AssignedG2Point<C>) -> [Self; 4]
+    where
+        C: BDCurveAffine<Base = F>,
+    {
+        let coordinates = input.coordinates();
+        [
+            Self::Assigned(coordinates.0 .0.clone()),
+            Self::Assigned(coordinates.0 .1.clone()),
+            Self::Assigned(coordinates.1 .0.clone()),
+            Self::Assigned(coordinates.1 .1.clone()),
+        ]
+    }
+
+    pub fn from_fp12<C>(input: &Tuple12<C>) -> [Self; 12]
+    where
+        C: CurveAffine<Base = F>,
+    {
+        input
+            .elements
+            .map(|coeff| Self::Unassigned(Value::known(coeff)))
+    }
+
+    pub fn from_assigned_fp12<C>(input: &AssignedTuple12<C>) -> [Self; 12]
+    where
+        C: CurveAffine<Base = F>,
+    {
+        input.elements().map(|coeff| Self::Assigned(coeff.clone()))
     }
 
     pub fn value(&self) -> Value<F> {

@@ -4,7 +4,9 @@ use halo2_proofs::{arithmetic::CurveAffine, plonk::Error};
 
 use crate::{
     ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
+    gadgets::{ecc2::G2Point, fp12::Tuple12},
     main_gate::{AssignedBit, RegionCtx, WrapValue},
+    traits::BDCurveAffine,
 };
 
 /// A helper trait to obsorb different objects into RO
@@ -59,14 +61,43 @@ pub trait ROTrait<F: PrimeField> {
     }
 
     /// Adds a point to the internal state
-    fn absorb_point<C: CurveAffine<Base = F>>(&mut self, p: &C) -> &mut Self;
+    fn absorb_point<C: BDCurveAffine<Base = F>>(&mut self, p: &C) -> &mut Self;
 
-    fn absorb_point_iter<'item, C: CurveAffine<Base = F>>(
+    fn absorb_point_iter<'item, C: BDCurveAffine<Base = F>>(
         &mut self,
         points: impl Iterator<Item = &'item C>,
     ) -> &mut Self {
         points.for_each(|p| {
             self.absorb_point(p);
+        });
+
+        self
+    }
+
+    fn absorb_g2_point<C: BDCurveAffine<Base = F>>(
+        &mut self,
+        p: &G2Point<C, C::ScalarExt>,
+    ) -> &mut Self;
+
+    fn absorb_g2_point_iter<'item, C: BDCurveAffine<Base = F>>(
+        &mut self,
+        points: impl Iterator<Item = &'item G2Point<C, C::ScalarExt>>,
+    ) -> &mut Self {
+        points.for_each(|p| {
+            self.absorb_g2_point(p);
+        });
+
+        self
+    }
+
+    fn absorb_fp12_tuple<C: BDCurveAffine<Base = F>>(&mut self, t: &Tuple12<C>) -> &mut Self;
+
+    fn absorb_fp12_tuple_iter<'item, C: BDCurveAffine<Base = F>>(
+        &mut self,
+        tuples: impl Iterator<Item = &'item Tuple12<C>>,
+    ) -> &mut Self {
+        tuples.for_each(|t| {
+            self.absorb_fp12_tuple(t);
         });
 
         self
@@ -99,6 +130,12 @@ pub trait ROCircuitTrait<F: PrimeFieldBits + FromUniformBytes<64>> {
 
     /// Adds a point to the internal state
     fn absorb_point(&mut self, point: [WrapValue<F>; 2]) -> &mut Self;
+
+    /// Adds a g2 point to the internal state
+    fn absorb_g2_point(&mut self, point: [WrapValue<F>; 4]) -> &mut Self;
+
+    /// Adds an fp12 tuple to the internal state
+    fn absorb_fp12_tuple(&mut self, point: [WrapValue<F>; 12]) -> &mut Self;
 
     /// Adds elements of iterator of [`WrapValues`] to the internal state
     fn absorb_iter<I>(&mut self, iter: impl Iterator<Item = I>) -> &mut Self

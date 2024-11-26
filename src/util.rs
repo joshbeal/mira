@@ -411,7 +411,7 @@ pub mod try_multi_product {
         /// # Example
         ///
         /// ```
-        /// use crate::sirius::util::TryMultiProduct;
+        /// use crate::mira::util::TryMultiProduct;
         ///
         /// let iterators = vec![
         ///     vec![Result::<_, ()>::Ok(1), Ok(2), Ok(3)].into_iter(),

@@ -3,42 +3,78 @@
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use std::{
-    fmt,
     fs::{self, File},
     path::{Path, PathBuf},
 };
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use git2::Repository;
 use tracing::info;
 use tracing_subscriber::{filter::LevelFilter, fmt::format::FmtSpan, EnvFilter};
 
 pub mod circuit;
-
-mod ipa;
-mod kzg;
+pub mod conversion;
+pub mod util;
 
 mod mira_mod {
     use std::{io, num::NonZeroUsize, path::Path};
 
+    use ark_bn254::Fr;
+    use ark_ff::One;
+    use ark_std::vec::Vec;
+
     use halo2_proofs::halo2curves::{bn256, grumpkin, CurveAffine};
     use mira::{
         commitment::CommitmentKey,
-        ff::Field,
+        ff::{Field, PrimeField},
         gadgets::merkle_tree_gadget::{off_circuit::Tree, *},
         group::{prime::PrimeCurve, Group},
         ivc::{step_circuit::trivial, CircuitPublicParamsInput, PublicParams, IVC},
     };
     use tracing::info_span;
 
-    use crate::circuit::MerkleTreeUpdateCircuit;
+    use crate::circuit::ProgramCounterUpdateCircuit;
+    use crate::conversion::ark_to_ff_field;
 
     const ARITY: usize = 1;
 
-    const CIRCUIT_TABLE_SIZE1: usize = 17;
-    const CIRCUIT_TABLE_SIZE2: usize = 17;
+    fn get_circuit_table_size(matrix_dim: usize) -> (usize, usize) {
+        match matrix_dim {
+            0 => (23, 23),
+            32 => (22, 22),
+            64 => (22, 22),
+            128 => (22, 22),
+            256 => (22, 22),
+            512 => (22, 22),
+            1024 => (22, 22),
+            2048 => (22, 22),
+            4096 => (22, 22),
+            8192 => (22, 22),
+            _ => panic!(
+                "Invalid matrix dim: {}. Supported matrix dims are 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192.",
+                matrix_dim
+            ),
+        }
+    }
 
-    const COMMITMENT_KEY_SIZE: usize = 23;
+    fn get_commitment_key_size(matrix_dim: usize) -> (usize, usize) {
+        match matrix_dim {
+            0 => (27, 26),
+            32 => (26, 25),
+            64 => (26, 25),
+            128 => (26, 25),
+            256 => (26, 25),
+            512 => (26, 25),
+            1024 => (26, 25),
+            2048 => (26, 25),
+            4096 => (26, 25),
+            8192 => (26, 25),
+            _ => panic!(
+                "Invalid batch size: {}. Supported batch sizes are 32, 64, 128, 256, 512, 1024, 2048, 4096.",
+                matrix_dim
+            ),
+        }
+    }
 
     const LIMBS_COUNT_LIMIT: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(10) };
     const LIMB_WIDTH: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(32) };
@@ -64,13 +100,50 @@ mod mira_mod {
         unsafe { CommitmentKey::load_or_setup_cache(Path::new(FOLDER), label, k) }
     }
 
-    pub fn run(repeat_count: usize) {
-        let mut rng = rand::thread_rng();
+    // Assumes that all input vectors have length 2
+    fn add_indices_to_elements<F: PrimeField>(v: Vec<Vec<Vec<F>>>) -> Vec<Vec<(u32, F)>> {
+        v.into_iter()
+            .enumerate()
+            .flat_map(|(batch_idx, batch)| {
+                let batch_len = batch.len();
+                batch.into_iter().enumerate().map(move |(proof_idx, vec)| {
+                    vec.into_iter()
+                        .enumerate()
+                        .map(|(j, element)| {
+                            (
+                                (batch_idx * batch_len * 2 + proof_idx * 2 + j) as u32,
+                                element,
+                            )
+                        })
+                        .collect::<Vec<(u32, F)>>()
+                })
+            })
+            .collect()
+    }
 
-        let _span = info_span!("merkle_example").entered();
+    pub fn run(repeat_count: usize, matrix_dim: usize, baseline: bool) {
+        let _span = info_span!("zkml_example").entered();
         let prepare_span = info_span!("prepare").entered();
 
-        let mut sc1 = MerkleTreeUpdateCircuit::new_with_random_updates(&mut rng, 1, repeat_count);
+        let inputs: Vec<Fr> = [Fr::one(); 2].to_vec();
+        let converted_inputs: Vec<_> = (0..repeat_count + 1)
+            .map(|_| {
+                inputs
+                    .iter()
+                    .map(|inp| ark_to_ff_field::<Fr, C1Scalar, 64>(*inp).unwrap())
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+
+        let updates = add_indices_to_elements(vec![converted_inputs]);
+
+        println!("matrix dim {}", matrix_dim);
+
+        let size_param = if baseline { 0 } else { matrix_dim };
+        let (circuit_table_size1, circuit_table_size2) = get_circuit_table_size(size_param);
+        let (commitment_key_size1, commitment_key_size2) = get_commitment_key_size(size_param);
+
+        let mut sc1 = ProgramCounterUpdateCircuit::new_with_updates(&updates, 1, repeat_count);
 
         let sc2 = trivial::Circuit::<ARITY, _>::default();
 
@@ -78,10 +151,10 @@ mod mira_mod {
         let secondary_spec = RandomOracleConstant::<C2Scalar>::new(10, 10);
 
         let primary_commitment_key =
-            get_or_create_commitment_key::<bn256::G1Affine>(COMMITMENT_KEY_SIZE, "bn256")
+            get_or_create_commitment_key::<bn256::G1Affine>(commitment_key_size1, "bn256")
                 .expect("Failed to get secondary key");
         let secondary_commitment_key =
-            get_or_create_commitment_key::<grumpkin::G1Affine>(COMMITMENT_KEY_SIZE, "grumpkin")
+            get_or_create_commitment_key::<grumpkin::G1Affine>(commitment_key_size2, "grumpkin")
                 .expect("Failed to get primary key");
 
         let pp = PublicParams::<
@@ -91,13 +164,13 @@ mod mira_mod {
             T,
             C1Affine,
             C2Affine,
-            MerkleTreeUpdateCircuit<_>,
+            ProgramCounterUpdateCircuit<_>,
             trivial::Circuit<ARITY, _>,
             RandomOracle,
             RandomOracle,
         >::new(
             CircuitPublicParamsInput::new(
-                CIRCUIT_TABLE_SIZE1 as u32,
+                circuit_table_size1 as u32,
                 0,
                 0,
                 0,
@@ -107,11 +180,11 @@ mod mira_mod {
                 &sc1,
             ),
             CircuitPublicParamsInput::new(
-                CIRCUIT_TABLE_SIZE2 as u32,
-                0,
-                0,
-                0,
-                0,
+                circuit_table_size2 as u32,
+                23,
+                2,
+                3,
+                12,
                 &secondary_commitment_key,
                 secondary_spec.clone(),
                 &sc2,
@@ -145,17 +218,18 @@ mod mira_mod {
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[command(subcommand)]
-    mode: Option<ProofSystem>,
     #[arg(long, default_value_t = 1, global = true)]
     repeat_count: usize,
+    #[arg(long, default_value_t = 16, global = true)]
+    matrix_dim: usize,
     #[arg(long, default_value_t = false, global = true)]
     json_logs: bool,
     #[arg(long, default_value_t = false, global = true)]
     clean_cache: bool,
-    /// Push all logs into file, with name builded from params
     #[arg(long, default_value_t = false, global = true)]
     file_logs: bool,
+    #[arg(long, default_value_t = false, global = true)]
+    baseline: bool,
 }
 
 pub fn build_log_folder() -> PathBuf {
@@ -191,16 +265,14 @@ impl Args {
         }
 
         let Args {
-            mode, repeat_count, ..
+            repeat_count,
+            matrix_dim,
+            ..
         } = &self;
 
-        Some(build_log_folder().join(match mode {
-            None | Some(ProofSystem::Mira) => {
-                format!("mira_merkle-1_trivial-1_{repeat_count}.log")
-            }
-            Some(ProofSystem::Halo2Kzg) => format!("halo2_kzg_merkle_{repeat_count}.log"),
-            Some(ProofSystem::Halo2Ipa) => format!("halo2_ipa_merkle_{repeat_count}.log"),
-        }))
+        Some(build_log_folder().join(format!(
+            "mira_zkml-1_trivial-1_{repeat_count}_{matrix_dim}.log"
+        )))
     }
 
     fn init_logger(&self) {
@@ -239,28 +311,6 @@ impl Args {
     }
 }
 
-#[derive(Default, Debug, Subcommand, Clone, Copy)]
-enum ProofSystem {
-    #[default]
-    Mira,
-    Halo2Kzg,
-    Halo2Ipa,
-}
-
-impl fmt::Display for ProofSystem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Mira => "mira",
-                Self::Halo2Kzg => "halo2_kzg",
-                Self::Halo2Ipa => "halo2_ipa",
-            }
-        )
-    }
-}
-
 fn main() {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
@@ -268,9 +318,5 @@ fn main() {
     let args = Args::parse();
     args.init_logger();
 
-    match args.mode.unwrap_or_default() {
-        ProofSystem::Mira => mira_mod::run(args.repeat_count),
-        ProofSystem::Halo2Ipa => ipa::run(args.repeat_count),
-        ProofSystem::Halo2Kzg => kzg::run(args.repeat_count, args.clean_cache),
-    }
+    mira_mod::run(args.repeat_count, args.matrix_dim, args.baseline);
 }

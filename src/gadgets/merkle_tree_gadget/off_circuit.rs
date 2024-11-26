@@ -5,7 +5,7 @@ use serde::Serialize;
 use tracing::*;
 
 use super::{RATE, T};
-use sirius::{
+use crate::{
     halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
     poseidon::{PoseidonRO, ROPair, Spec},
 };
