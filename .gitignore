@@ -10,3 +10,4 @@ tags
 .logs
 .env
 __pycache__
+!requirements.txt
